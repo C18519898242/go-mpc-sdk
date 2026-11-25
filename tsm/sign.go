@@ -25,7 +25,7 @@ type SchnorrPartialSignResult struct {
 }
 
 func (s *ecdsaService) Sign(ctx context.Context, session *SessionConfig, keyID string, path []uint32, digest []byte) (*ECDSAPartialSignResult, error) {
-	if len(digest) == 0 || (s.client.native && len(digest) != sha256.Size) {
+	if !s.client.validSigningDigest(digest) {
 		return nil, fmt.Errorf("%w: invalid ECDSA digest length", ErrInvalidInput)
 	}
 	request := struct {
@@ -63,18 +63,26 @@ func (c *Client) signFormat() string {
 	return ""
 }
 
+func (c *Client) validSigningDigest(digest []byte) bool {
+	return len(digest) > 0 && (!c.native || len(digest) == sha256.Size)
+}
+
 func (c *Client) sign(ctx context.Context, endpoint, scheme string, session *SessionConfig, keyID string, request any) ([]byte, string, error) {
 	if !keyIDPattern.MatchString(keyID) || session == nil || len(session.players) < 2 {
 		return nil, "", fmt.Errorf("%w: signing needs a valid key ID and a session with at least two players", ErrInvalidInput)
 	}
+	return c.requestSigningShare(ctx, endpoint+"/"+keyID+"/sign", scheme, session, request)
+}
+
+func (c *Client) requestSigningShare(ctx context.Context, endpoint, scheme string, session *SessionConfig, request any) ([]byte, string, error) {
 	var response struct {
 		builderSignResponse
 		Signature []byte `json:"signature"`
 	}
-	if err := c.request(ctx, http.MethodPost, endpoint+"/"+keyID+"/sign", session, request, &response); err != nil {
+	if err := c.request(ctx, http.MethodPost, endpoint, session, request, &response); err != nil {
 		return nil, "", err
 	}
-	if c.native && len(response.Signature) != 0 {
+	if c.native && session != nil && len(response.Signature) != 0 {
 		return nil, "", signatureError("upgrade mpc-node-api to enable signing shares")
 	}
 	part, err := response.builderSignResponse.partial(scheme)

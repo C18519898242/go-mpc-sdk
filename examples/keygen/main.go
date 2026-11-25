@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ func main() {
 	keyID := flag.String("key-id", "", "optional key ID shared by all players")
 	message := flag.String("message", "", "message to sign after key generation")
 	chainPath := flag.String("chain-path", "", "comma-separated non-hardened child indices for signing")
+	presign := flag.Bool("presign", false, "generate and consume a presignature before combining signatures")
 	flag.Parse()
 	var signMessage []byte
 	flag.Visit(func(f *flag.Flag) {
@@ -40,7 +42,10 @@ func main() {
 			path = append(path, uint32(index))
 		}
 	}
-	if err := run(strings.Split(*addresses, ","), *algorithm, *threshold, *keyID, signMessage, path); err != nil {
+	if *presign && signMessage == nil {
+		log.Fatal("-presign requires -message")
+	}
+	if err := run(strings.Split(*addresses, ","), *algorithm, *threshold, *keyID, signMessage, path, *presign); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -50,7 +55,7 @@ type keyService interface {
 	PublicKey(context.Context, string, []uint32) ([]byte, error)
 }
 
-func run(addresses []string, algorithm string, threshold int, desiredID string, message []byte, path []uint32) error {
+func run(addresses []string, algorithm string, threshold int, desiredID string, message []byte, path []uint32, presign bool) error {
 	var variant string
 	switch algorithm {
 	case "ecdsa":
@@ -118,13 +123,21 @@ func run(addresses []string, algorithm string, threshold int, desiredID string, 
 	fmt.Printf("%s keyID=%s\npublicKey=%s\n", algorithm, ids[0], publicKey)
 	if message != nil {
 		// The first threshold+1 nodes are enough to sign.
-		return signAndVerify(ctx, clients[:threshold+1], algorithm, ids[0], path, message)
+		return signAndVerify(ctx, clients[:threshold+1], algorithm, ids[0], path, message, presign)
 	}
 	return nil
 }
 
-func signAndVerify(ctx context.Context, signers []*tsm.Client, algorithm, keyID string, path []uint32, message []byte) error {
+func signAndVerify(ctx context.Context, signers []*tsm.Client, algorithm, keyID string, path []uint32, message []byte, presign bool) error {
 	session := tsm.NewStaticSessionConfig(tsm.GenerateSessionID(), len(signers))
+	var presignatureID string
+	if presign {
+		var err error
+		presignatureID, err = generatePresignature(ctx, signers, session, algorithm, keyID)
+		if err != nil {
+			return err
+		}
+	}
 	digest := sha256.Sum256(message)
 	parts, failures := make([][]byte, len(signers)), make([]error, len(signers))
 	var wg sync.WaitGroup
@@ -133,13 +146,25 @@ func signAndVerify(ctx context.Context, signers []*tsm.Client, algorithm, keyID 
 		go func() {
 			defer wg.Done()
 			if algorithm == "ecdsa" {
-				result, err := client.ECDSA().Sign(ctx, session, keyID, path, digest[:])
+				var result *tsm.ECDSAPartialSignResult
+				var err error
+				if presign {
+					result, err = client.ECDSA().SignWithPresignature(ctx, keyID, presignatureID, path, digest[:])
+				} else {
+					result, err = client.ECDSA().Sign(ctx, session, keyID, path, digest[:])
+				}
 				failures[i] = err
 				if err == nil {
 					parts[i] = result.PartialSignature
 				}
 			} else {
-				result, err := client.Schnorr().Sign(ctx, session, keyID, path, message)
+				var result *tsm.SchnorrPartialSignResult
+				var err error
+				if presign {
+					result, err = client.Schnorr().SignWithPresignature(ctx, keyID, presignatureID, path, message)
+				} else {
+					result, err = client.Schnorr().Sign(ctx, session, keyID, path, message)
+				}
 				failures[i] = err
 				if err == nil {
 					parts[i] = result.PartialSignature
@@ -150,6 +175,9 @@ func signAndVerify(ctx context.Context, signers []*tsm.Client, algorithm, keyID 
 	wg.Wait()
 	for i, err := range failures {
 		if err != nil {
+			if presign {
+				return fmt.Errorf("sign with presignature %s, player %d: %w", presignatureID, i, err)
+			}
 			return fmt.Errorf("sign session %s, player %d: %w", session.SessionID(), i, err)
 		}
 	}
@@ -181,4 +209,31 @@ func signAndVerify(ctx context.Context, signers []*tsm.Client, algorithm, keyID 
 	}
 	fmt.Printf("signature=%x\n", signature)
 	return nil
+}
+
+func generatePresignature(ctx context.Context, signers []*tsm.Client, session *tsm.SessionConfig, algorithm, keyID string) (string, error) {
+	ids, failures := make([][]string, len(signers)), make([]error, len(signers))
+	var wg sync.WaitGroup
+	for i, client := range signers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if algorithm == "ecdsa" {
+				ids[i], failures[i] = client.ECDSA().GeneratePresignatures(ctx, session, keyID, 1)
+			} else {
+				ids[i], failures[i] = client.Schnorr().GeneratePresignatures(ctx, session, keyID, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	for i, err := range failures {
+		if err != nil {
+			return "", fmt.Errorf("presign session %s, player %d: %w", session.SessionID(), i, err)
+		}
+		if !slices.Equal(ids[i], ids[0]) {
+			return "", fmt.Errorf("presign session %s returned different presignature IDs", session.SessionID())
+		}
+	}
+	fmt.Printf("presignatureID=%s\n", ids[0][0])
+	return ids[0][0], nil
 }

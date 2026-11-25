@@ -10,7 +10,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/C18519898242/go-mpc-sdk/tsm"
@@ -19,6 +20,16 @@ import (
 )
 
 func TestNativeSigningWorkflow(t *testing.T) {
+	testSigningWorkflow(t, "frost", false)
+}
+
+func TestPresignatureWorkflow(t *testing.T) {
+	t.Run("mpc-node-api", func(t *testing.T) { testSigningWorkflow(t, "frost", true) })
+	t.Run("BuilderVault", func(t *testing.T) { testSigningWorkflow(t, "schnorr", true) })
+}
+
+func testSigningWorkflow(t *testing.T, edEndpoint string, usePresignature bool) {
+	t.Helper()
 	ctx := context.Background()
 	message := []byte("SDK signing contract")
 	digest := sha256.Sum256(message)
@@ -38,6 +49,15 @@ func TestNativeSigningWorkflow(t *testing.T) {
 	}
 	session := tsm.NewSessionConfig("demo_sign", []int{0, 2}, nil, nil)
 	path := []uint32{0, 1}
+	edBase := "/" + edEndpoint + "/keys/test-key"
+	ecBase := "/ecdsa/keys/test-key"
+	players := []string{"1", "3"}
+	protocols := `{"ecdsa":{"name":"cmp","version":1},"frost":{"name":"frost","version":1}}`
+	if edEndpoint == "schnorr" {
+		players = []string{"0", "2"}
+		protocols = `{"ecdsa":14,"schnorr":3}`
+	}
+	wantIDs := []string{"first-presignature", "second-presignature"}
 	var ecParts, edParts [][]byte
 	var ecPublic, edPublic []byte
 	for i := 0; i < 2; i++ {
@@ -49,25 +69,44 @@ func TestNativeSigningWorkflow(t *testing.T) {
 			case "/version":
 				io.WriteString(w, `{"version":"1"}`)
 			case "/info/protocols":
-				io.WriteString(w, `{"ecdsa":{"name":"cmp","version":1},"frost":{"name":"frost","version":1}}`)
-			case "/ecdsa/keys/test-key/sign", "/frost/keys/test-key/sign":
-				if r.Method != http.MethodPost || r.Header.Get("MPC-SessionID") != "demo_sign" ||
-					r.Header.Get("MPC-RoutingID") != "40c3db0d23956156" || r.URL.Query().Get("mpc_routing_id") != "40c3db0d23956156" ||
-					!reflect.DeepEqual(r.Header.Values("MPC-Players"), []string{"1", "3"}) {
-					t.Error("incorrect session metadata")
+				io.WriteString(w, protocols)
+			case ecBase + "/2/presiggen", edBase + "/2/presiggen":
+				checkSigningSession(t, r, players)
+				if body, err := io.ReadAll(r.Body); err != nil || len(body) != 0 {
+					t.Error("presign generation requires an empty request body")
+				}
+				json.NewEncoder(w).Encode(map[string][]string{"ids": wantIDs})
+			case ecBase + "/sign", edBase + "/sign", ecBase + "/signwithpresig", edBase + "/signwithpresig":
+				format, requestedID := "partial", ""
+				if usePresignature {
+					if !strings.HasSuffix(r.URL.Path, "/signwithpresig") || r.Method != http.MethodPost ||
+						r.Header.Get("MPC-SessionID") != "" || len(r.Header.Values("MPC-Players")) != 0 || r.URL.RawQuery != "" {
+						t.Error("presign consumption must be a local request without an MPC session")
+					}
+					format, requestedID = "", wantIDs[0]
+					if i == 0 {
+						requestedID = ""
+					}
+				} else {
+					checkSigningSession(t, r, players)
 				}
 				var request struct {
-					ChainPath   []uint32 `json:"chainPath"`
-					MessageHash []byte   `json:"messageHash"`
-					Message     []byte   `json:"message"`
-					Format      string   `json:"signatureFormat"`
+					ChainPath      []uint32 `json:"chainPath"`
+					MessageHash    []byte   `json:"messageHash"`
+					Message        []byte   `json:"message"`
+					Format         string   `json:"signatureFormat"`
+					PresignatureID string   `json:"presignatureId"`
 				}
-				if err := json.NewDecoder(r.Body).Decode(&request); err != nil || !reflect.DeepEqual(request.ChainPath, path) || request.Format != "partial" {
-					t.Error("incorrect signing path")
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil ||
+					!slices.Equal(request.ChainPath, path) || request.Format != format || request.PresignatureID != requestedID {
+					t.Error("incorrect signing request")
 				}
 				partial := map[string]any{"playerIndex": i * 2, "threshold": 1, "sharing": "additive"}
+				if usePresignature {
+					partial["presignatureId"] = wantIDs[0]
+				}
 				curve, rPoint, publicKey, s := "secp256k1", nonce.SerializeUncompressed(), secpKey.PubKey().SerializeUncompressed(), compact[33:]
-				if r.URL.Path == "/ecdsa/keys/test-key/sign" {
+				if strings.HasPrefix(r.URL.Path, ecBase+"/") {
 					if !bytes.Equal(request.MessageHash, digest[:]) || request.Message != nil {
 						t.Error("ECDSA must send the digest")
 					}
@@ -84,7 +123,7 @@ func TestNativeSigningWorkflow(t *testing.T) {
 				}
 				partial["curve"], partial["r"], partial["publicKey"], partial["sShare"] = curve, rPoint, publicKey, scalar.FillBytes(make([]byte, 32))
 				json.NewEncoder(w).Encode(partial)
-			case "/ecdsa/keys/test-key/publickey", "/frost/keys/test-key/publickey":
+			case ecBase + "/publickey", edBase + "/publickey":
 				if r.Header.Get("MPC-SessionID") != "" || r.URL.RawQuery != "" {
 					t.Error("public key lookup must not join the signing session")
 				}
@@ -92,7 +131,7 @@ func TestNativeSigningWorkflow(t *testing.T) {
 					t.Errorf("incorrect public key path: %s", body)
 				}
 				curve, key := "secp256k1", secpKey.PubKey().SerializeUncompressed()
-				if r.URL.Path == "/frost/keys/test-key/publickey" {
+				if r.URL.Path == edBase+"/publickey" {
 					curve, key = "ed25519", edKey.Public().(ed25519.PublicKey)
 				}
 				json.NewEncoder(w).Encode(struct {
@@ -109,15 +148,40 @@ func TestNativeSigningWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ec, err := client.ECDSA().Sign(ctx, session, "test-key", path, digest[:])
-		if err != nil {
-			t.Fatal(err)
+		var ec *tsm.ECDSAPartialSignResult
+		var ed *tsm.SchnorrPartialSignResult
+		if usePresignature {
+			ids, err := client.ECDSA().GeneratePresignatures(ctx, session, "test-key", 2)
+			if err != nil || !slices.Equal(ids, wantIDs) {
+				t.Fatalf("wrong ECDSA presignature IDs: %v, %v", ids, err)
+			}
+			ids, err = client.Schnorr().GeneratePresignatures(ctx, session, "test-key", 2)
+			if err != nil || !slices.Equal(ids, wantIDs) {
+				t.Fatalf("wrong Ed25519 presignature IDs: %v, %v", ids, err)
+			}
+			requestedID := ""
+			if i != 0 {
+				requestedID = wantIDs[0]
+			}
+			ec, err = client.ECDSA().SignWithPresignature(ctx, "test-key", requestedID, path, digest[:])
+			if err != nil || ec.PresignatureID != wantIDs[0] {
+				t.Fatalf("ECDSA presignature signing: %v", err)
+			}
+			ed, err = client.Schnorr().SignWithPresignature(ctx, "test-key", requestedID, path, message)
+			if err != nil || ed.PresignatureID != wantIDs[0] {
+				t.Fatalf("Ed25519 presignature signing: %v", err)
+			}
+		} else {
+			ec, err = client.ECDSA().Sign(ctx, session, "test-key", path, digest[:])
+			if err != nil {
+				t.Fatal(err)
+			}
+			ed, err = client.Schnorr().Sign(ctx, session, "test-key", path, message)
+			if err != nil {
+				t.Fatal(err)
+			}
 		}
 		ecParts = append(ecParts, ec.PartialSignature)
-		ed, err := client.Schnorr().Sign(ctx, session, "test-key", path, message)
-		if err != nil {
-			t.Fatal(err)
-		}
 		edParts = append(edParts, ed.PartialSignature)
 		ecPublic, err = client.ECDSA().PublicKey(ctx, "test-key", path)
 		if err != nil {
@@ -157,5 +221,14 @@ func TestNativeSigningWorkflow(t *testing.T) {
 	}
 	if _, err := tsm.SchnorrFinalizeSignature([]byte("different"), edParts); err == nil {
 		t.Fatal("accepted a different message")
+	}
+}
+
+func checkSigningSession(t *testing.T, r *http.Request, players []string) {
+	t.Helper()
+	if r.Method != http.MethodPost || r.Header.Get("MPC-SessionID") != "demo_sign" ||
+		r.Header.Get("MPC-RoutingID") != "40c3db0d23956156" || r.URL.Query().Get("mpc_routing_id") != "40c3db0d23956156" ||
+		!slices.Equal(r.Header.Values("MPC-Players"), players) {
+		t.Error("incorrect session metadata")
 	}
 }

@@ -12,18 +12,28 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
-// ECDSAAPI provides Secp256k1 key creation, public key lookup and online signing.
+// ECDSAAPI provides Secp256k1 key creation, public key lookup and signing.
 type ECDSAAPI interface {
 	GenerateKey(ctx context.Context, sessionConfig *SessionConfig, threshold int, curveName, desiredKeyID string) (string, error)
 	PublicKey(ctx context.Context, keyID string, derivationPath []uint32) ([]byte, error)
 	Sign(ctx context.Context, sessionConfig *SessionConfig, keyID string, derivationPath []uint32, messageHash []byte) (*ECDSAPartialSignResult, error)
+	// GeneratePresignatures participates in a shared MPC session to generate one-time signing material.
+	GeneratePresignatures(ctx context.Context, sessionConfig *SessionConfig, keyID string, presignatureCount uint64) ([]string, error)
+	// SignWithPresignature consumes one local presignature and returns a signature share.
+	// An empty presignatureID lets this node choose an available ID.
+	SignWithPresignature(ctx context.Context, keyID, presignatureID string, derivationPath []uint32, messageHash []byte) (*ECDSAPartialSignResult, error)
 }
 
-// SchnorrAPI provides Ed25519 key creation, public key lookup and online signing.
+// SchnorrAPI provides Ed25519 key creation, public key lookup and signing.
 type SchnorrAPI interface {
 	GenerateKey(ctx context.Context, sessionConfig *SessionConfig, threshold int, schnorrVariant, desiredKeyID string) (string, error)
 	PublicKey(ctx context.Context, keyID string, derivationPath []uint32) ([]byte, error)
 	Sign(ctx context.Context, sessionConfig *SessionConfig, keyID string, derivationPath []uint32, message []byte) (*SchnorrPartialSignResult, error)
+	// GeneratePresignatures participates in a shared MPC session to generate one-time signing material.
+	GeneratePresignatures(ctx context.Context, sessionConfig *SessionConfig, keyID string, presignatureCount uint64) ([]string, error)
+	// SignWithPresignature consumes one local presignature and returns a signature share.
+	// An empty presignatureID lets this node choose an available ID.
+	SignWithPresignature(ctx context.Context, keyID, presignatureID string, derivationPath []uint32, message []byte) (*SchnorrPartialSignResult, error)
 }
 
 // SchnorrEd25519 selects the Ed25519 variant of the Schnorr API.
