@@ -164,6 +164,10 @@ func decodeProtocol(raw json.RawMessage) (enabled, native bool, err error) {
 }
 
 func (c *Client) request(ctx context.Context, method, path string, session *SessionConfig, input, output any) error {
+	return c.requestWithLimit(ctx, method, path, session, input, output, 64<<10)
+}
+
+func (c *Client) requestWithLimit(ctx context.Context, method, path string, session *SessionConfig, input, output any, maxResponse int64) error {
 	var body io.Reader
 	if input != nil {
 		data, err := json.Marshal(input)
@@ -195,7 +199,6 @@ func (c *Client) request(ctx context.Context, method, path string, session *Sess
 		return fmt.Errorf("%w: %s %s: %w", ErrOperationFailed, method, path, err)
 	}
 	defer response.Body.Close()
-	const maxResponse = 64 << 10
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxResponse+1))
 	if err != nil {
 		return fmt.Errorf("%w: read %s response: %w", ErrOperationFailed, path, err)
@@ -203,7 +206,7 @@ func (c *Client) request(ctx context.Context, method, path string, session *Sess
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("%w: %s %s returned HTTP %d", statusError(response.StatusCode), method, path, response.StatusCode)
 	}
-	if len(data) > maxResponse || (output != nil && json.Unmarshal(data, output) != nil) {
+	if int64(len(data)) > maxResponse || (output != nil && json.Unmarshal(data, output) != nil) {
 		return fmt.Errorf("%w: invalid JSON response from %s", ErrOperationFailed, path)
 	}
 	return nil

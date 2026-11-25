@@ -20,6 +20,11 @@ type ECDSAAPI interface {
 	// CopyKey creates a new sharing of the same key. A new holder supplies an
 	// empty sourceKeyID and the curve name. An existing holder supplies the source ID and an empty curve name.
 	CopyKey(ctx context.Context, sessionConfig *SessionConfig, sourceKeyID, curveName string, newThreshold int, desiredKeyID string) (string, error)
+	// ExportKey returns this player's share encrypted to the supplied RSA public key.
+	ExportKey(ctx context.Context, sessionConfig *SessionConfig, keyID string, derivationPath []uint32, wrappingKey []byte) (*ECDSAWrappedKeyShare, error)
+	// ImportKey imports this player's share in a fresh MPC session and returns the new key ID.
+	// For mpc-node-api, a post-import public-key check can return a committed ID and an error.
+	ImportKey(ctx context.Context, sessionConfig *SessionConfig, threshold int, wrappedKeyShare, wrappedChainCode, jsonPublicKey []byte, desiredKeyID string) (string, error)
 	PublicKey(ctx context.Context, keyID string, derivationPath []uint32) ([]byte, error)
 	Sign(ctx context.Context, sessionConfig *SessionConfig, keyID string, derivationPath []uint32, messageHash []byte) (*ECDSAPartialSignResult, error)
 	// GeneratePresignatures participates in a shared MPC session to generate one-time signing material.
@@ -37,6 +42,11 @@ type SchnorrAPI interface {
 	// CopyKey creates a new sharing of the same key. A new holder supplies an
 	// empty sourceKeyID and the Ed25519 variant. Existing holders use the source ID.
 	CopyKey(ctx context.Context, sessionConfig *SessionConfig, sourceKeyID, schnorrVariant string, newThreshold int, desiredKeyID string) (string, error)
+	// ExportKey returns this player's share encrypted to the supplied RSA public key.
+	ExportKey(ctx context.Context, sessionConfig *SessionConfig, keyID string, derivationPath []uint32, wrappingKey []byte) (*SchnorrWrappedKeyShare, error)
+	// ImportKey imports this player's share in a fresh MPC session and returns the new key ID.
+	// For mpc-node-api, a post-import public-key check can return a committed ID and an error.
+	ImportKey(ctx context.Context, sessionConfig *SessionConfig, threshold int, wrappedKeyShare, wrappedChainCode, jsonPublicKey []byte, desiredKeyID string) (string, error)
 	PublicKey(ctx context.Context, keyID string, derivationPath []uint32) ([]byte, error)
 	Sign(ctx context.Context, sessionConfig *SessionConfig, keyID string, derivationPath []uint32, message []byte) (*SchnorrPartialSignResult, error)
 	// GeneratePresignatures participates in a shared MPC session to generate one-time signing material.
@@ -85,7 +95,8 @@ func (s *ecdsaService) GenerateKey(ctx context.Context, session *SessionConfig, 
 	if curve != "secp256k1" {
 		return "", fmt.Errorf("%w: ECDSA key creation supports secp256k1", ErrInvalidInput)
 	}
-	return s.client.requestNewKeyID(ctx, "/ecdsa/keys", session, keygenRequest{Threshold: threshold, Curve: curve, KeyID: desiredID})
+	request := keygenRequest{Threshold: threshold, Curve: curve, KeyID: desiredID}
+	return s.client.requestNewKeyID(ctx, "/ecdsa/keys", session, threshold, desiredID, request)
 }
 
 func (s *schnorrService) GenerateKey(ctx context.Context, session *SessionConfig, threshold int, variant, desiredID string) (string, error) {
@@ -96,23 +107,23 @@ func (s *schnorrService) GenerateKey(ctx context.Context, session *SessionConfig
 	if s.client.native {
 		request.Variant, request.Curve = "", "ed25519"
 	}
-	return s.client.requestNewKeyID(ctx, s.path, session, request)
+	return s.client.requestNewKeyID(ctx, s.path, session, threshold, desiredID, request)
 }
 
-func (c *Client) requestNewKeyID(ctx context.Context, path string, session *SessionConfig, req keygenRequest) (string, error) {
-	if session == nil || req.Threshold < 1 || req.Threshold >= len(session.players) {
+func (c *Client) requestNewKeyID(ctx context.Context, path string, session *SessionConfig, threshold int, desiredID string, request any) (string, error) {
+	if session == nil || threshold < 1 || threshold >= len(session.players) {
 		return "", fmt.Errorf("%w: threshold must be between 1 and the number of players minus 1", ErrInvalidInput)
 	}
-	if req.KeyID != "" && !keyIDPattern.MatchString(req.KeyID) {
+	if desiredID != "" && !keyIDPattern.MatchString(desiredID) {
 		return "", fmt.Errorf("%w: invalid key ID", ErrInvalidInput)
 	}
 	var response struct {
 		KeyID string `json:"keyID"`
 	}
-	if err := c.request(ctx, http.MethodPost, path, session, req, &response); err != nil {
+	if err := c.request(ctx, http.MethodPost, path, session, request, &response); err != nil {
 		return "", err
 	}
-	if !keyIDPattern.MatchString(response.KeyID) || (req.KeyID != "" && req.KeyID != response.KeyID) {
+	if !keyIDPattern.MatchString(response.KeyID) || (desiredID != "" && desiredID != response.KeyID) {
 		return "", fmt.Errorf("%w: invalid key ID in response", ErrOperationFailed)
 	}
 	return response.KeyID, nil
@@ -130,33 +141,43 @@ func (c *Client) publicKey(ctx context.Context, endpoint, scheme, keyID string, 
 	if !keyIDPattern.MatchString(keyID) {
 		return nil, fmt.Errorf("%w: invalid key ID", ErrInvalidInput)
 	}
-	var response struct {
-		Curve     string `json:"curve"`
-		Variant   string `json:"schnorr_variant"`
-		PublicKey []byte `json:"publicKey"`
-	}
+	var response publicKeyResponse
 	request := struct {
 		ChainPath []uint32 `json:"chainPath"`
 	}{path}
 	if err := c.request(ctx, http.MethodPost, endpoint+"/"+keyID+"/publickey", nil, request, &response); err != nil {
 		return nil, err
 	}
-	curve, point := response.Curve, response.PublicKey
+	key, err := response.normalize(scheme)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(key)
+}
+
+type publicKeyResponse struct {
+	Curve     string `json:"curve"`
+	Variant   string `json:"schnorr_variant,omitempty"`
+	PublicKey []byte `json:"publicKey"`
+}
+
+func (r publicKeyResponse) normalize(scheme string) (encodedPublicKey, error) {
+	curve, point := r.Curve, r.PublicKey
 	if scheme == "ECDSA" {
 		key, err := secp256k1.ParsePubKey(point)
 		if err != nil || curve != "secp256k1" {
-			return nil, fmt.Errorf("%w: invalid secp256k1 public key", ErrOperationFailed)
+			return encodedPublicKey{}, fmt.Errorf("%w: invalid secp256k1 public key", ErrOperationFailed)
 		}
 		point = key.SerializeUncompressed()
 	} else {
 		key, err := new(edwards25519.Point).SetBytes(point)
-		validCurve := strings.EqualFold(curve, "ed25519") || strings.EqualFold(curve, "ED-25519") || (curve == "" && response.Variant == scheme)
-		if err != nil || !validCurve || (response.Variant != "" && response.Variant != scheme) || !validEd25519Point(key) {
-			return nil, fmt.Errorf("%w: invalid Ed25519 public key", ErrOperationFailed)
+		validCurve := strings.EqualFold(curve, "ed25519") || strings.EqualFold(curve, "ED-25519") || (curve == "" && r.Variant == scheme)
+		if err != nil || !validCurve || (r.Variant != "" && r.Variant != scheme) || !validEd25519Point(key) {
+			return encodedPublicKey{}, fmt.Errorf("%w: invalid Ed25519 public key", ErrOperationFailed)
 		}
 		curve, point = "ED-25519", key.Bytes()
 	}
-	return json.Marshal(encodedPublicKey{scheme, curve, point})
+	return encodedPublicKey{scheme, curve, point}, nil
 }
 
 // v73.5.2 returns this serialized SDK public-key envelope.

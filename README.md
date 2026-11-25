@@ -21,6 +21,10 @@
 | `client.Schnorr().Reshare(ctx, session, keyID)` | `POST /frost/keys/{keyID}/reshare` | `POST /schnorr/keys/{keyID}/reshare` |
 | `client.ECDSA().CopyKey(ctx, session, sourceID, curve, threshold, targetID)` | `POST /ecdsa/keys/{sourceKeyID}/keycopy` | 同左 |
 | `client.Schnorr().CopyKey(ctx, session, sourceID, variant, threshold, targetID)` | `POST /frost/keys/{sourceKeyID}/keycopy` | `POST /schnorr/keys/{sourceKeyID}/keycopy` |
+| `client.ECDSA().ExportKey(ctx, session, keyID, path, wrappingKey)` | `POST /ecdsa/keys/{keyID}/exportkey` | 同左 |
+| `client.Schnorr().ExportKey(ctx, session, keyID, path, wrappingKey)` | `POST /frost/keys/{keyID}/exportkey` | `POST /schnorr/keys/{keyID}/exportkey` |
+| `client.ECDSA().ImportKey(ctx, session, threshold, share, chainCode, publicKey, targetID)` | `POST /ecdsa/keys/importkey` | 同左 |
+| `client.Schnorr().ImportKey(ctx, session, threshold, share, chainCode, publicKey, targetID)` | `POST /frost/keys/importkey` | `POST /schnorr/keys/importkey` |
 
 `Configuration{URL: ...}.WithAPIKeyAuthentication(...)`、`NewClient`、`GenerateSessionID`、`NewSessionConfig` 和 `NewStaticSessionConfig` 沿用 Blockdaemon 的调用形状。每个客户端连接一个节点，初始化读取 `/version` 和 `/info/protocols`。会话玩家采用教程里的零起始索引。本机默认的 `mpc-node-api` 节点 ID 是 `1,2,3`，SDK 探测到对象格式的协议描述时自动转换编号。
 
@@ -81,6 +85,15 @@ replace gitlab.com/Blockdaemon/go-tsm-sdkv2/v73 => ../go-mpc-sdk
 | Ed25519 | `CopyKey(sourceID, "", 2, targetID)` | `CopyKey("", tsm.SchnorrEd25519, 2, targetID)` |
 
 示例中的新阈值 `2` 要求三个节点共同签名。副本使用独立分片，原密钥和副本对应相同的根公钥及派生公钥。
+
+## 导出和导入密钥
+
+1. 源节点启用 `keyTransfer.exportEnabled`，目标节点配置对应的 RSA 解包私钥。向选定的源节点并发调用 `ExportKey`，共享一个导出会话，并给每个源节点传对应目标节点的 RSA 公钥（SPKI DER）。传 `nil` 路径导出根密钥，传非硬化路径导出派生密钥。
+2. 用一个新会话向目标节点并发调用 `ImportKey`，每个节点使用自己收到的导出结果。所有目标节点使用相同阈值、相同目标 ID 和同一批导出的包。`mpc-node-api` 要求各节点的 `partyId` 与导出时对应。收齐成功响应并比对新 ID 一致后再使用密钥。
+
+按顺序把导出结果的 `WrappedKeyShare`、`WrappedChainCode`、`JSONPublicKey` 传给导入方法。`mpc-node-api` 的完整加密包在 `WrappedKeyShare` 中，chain code 已加密包含在包内，`WrappedChainCode` 为空。两种服务的加密包分别用于各自的导入接口。
+
+导出的密钥在目标上成为新的根密钥。若导出的是源密钥的 `m/0/1`，对目标密钥传 `nil` 路径会得到源 `m/0/1` 的公钥。连接 `mpc-node-api` 时，传入 `JSONPublicKey` 会在节点保存后核对导入的根公钥。如果这一步失败，SDK 同时返回已导入的 ID 和错误，应先核对该 ID 的实际公钥再使用。
 
 ## 本地示例
 

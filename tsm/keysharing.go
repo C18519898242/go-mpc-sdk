@@ -58,7 +58,7 @@ func (c *Client) copyKey(ctx context.Context, endpoint string, session *SessionC
 	if request.KeyID == "_" || request.KeyID == sourceKeyID {
 		return "", fmt.Errorf("%w: copy needs a new key ID", ErrInvalidInput)
 	}
-	copiedID, err := c.requestNewKeyID(ctx, endpoint+"/"+sourceKeyID+"/keycopy", session, request)
+	copiedID, err := c.requestNewKeyID(ctx, endpoint+"/"+sourceKeyID+"/keycopy", session, request.Threshold, request.KeyID, request)
 	if err != nil {
 		return "", err
 	}
