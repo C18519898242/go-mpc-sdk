@@ -2,6 +2,7 @@ package tsm
 
 import (
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -26,6 +27,8 @@ type ECDSAAPI interface {
 	// For mpc-node-api, a post-import public-key check can return a committed ID and an error.
 	ImportKey(ctx context.Context, sessionConfig *SessionConfig, threshold int, wrappedKeyShare, wrappedChainCode, jsonPublicKey []byte, desiredKeyID string) (string, error)
 	PublicKey(ctx context.Context, keyID string, derivationPath []uint32) ([]byte, error)
+	// GenerateRecoveryData returns this player's encrypted recovery data for the root key.
+	GenerateRecoveryData(ctx context.Context, sessionConfig *SessionConfig, keyID string, ersPublicKey *rsa.PublicKey, ersLabel []byte) ([]byte, error)
 	Sign(ctx context.Context, sessionConfig *SessionConfig, keyID string, derivationPath []uint32, messageHash []byte) (*ECDSAPartialSignResult, error)
 	// GeneratePresignatures participates in a shared MPC session to generate one-time signing material.
 	GeneratePresignatures(ctx context.Context, sessionConfig *SessionConfig, keyID string, presignatureCount uint64) ([]string, error)
@@ -48,6 +51,8 @@ type SchnorrAPI interface {
 	// For mpc-node-api, a post-import public-key check can return a committed ID and an error.
 	ImportKey(ctx context.Context, sessionConfig *SessionConfig, threshold int, wrappedKeyShare, wrappedChainCode, jsonPublicKey []byte, desiredKeyID string) (string, error)
 	PublicKey(ctx context.Context, keyID string, derivationPath []uint32) ([]byte, error)
+	// GenerateRecoveryData returns this player's encrypted recovery data for the root key.
+	GenerateRecoveryData(ctx context.Context, sessionConfig *SessionConfig, keyID string, ersPublicKey *rsa.PublicKey, ersLabel []byte) ([]byte, error)
 	Sign(ctx context.Context, sessionConfig *SessionConfig, keyID string, derivationPath []uint32, message []byte) (*SchnorrPartialSignResult, error)
 	// GeneratePresignatures participates in a shared MPC session to generate one-time signing material.
 	GeneratePresignatures(ctx context.Context, sessionConfig *SessionConfig, keyID string, presignatureCount uint64) ([]string, error)

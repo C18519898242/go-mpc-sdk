@@ -25,6 +25,8 @@
 | `client.Schnorr().ExportKey(ctx, session, keyID, path, wrappingKey)` | `POST /frost/keys/{keyID}/exportkey` | `POST /schnorr/keys/{keyID}/exportkey` |
 | `client.ECDSA().ImportKey(ctx, session, threshold, share, chainCode, publicKey, targetID)` | `POST /ecdsa/keys/importkey` | 同左 |
 | `client.Schnorr().ImportKey(ctx, session, threshold, share, chainCode, publicKey, targetID)` | `POST /frost/keys/importkey` | `POST /schnorr/keys/importkey` |
+| `client.ECDSA().GenerateRecoveryData(ctx, session, keyID, rsaPublicKey, label)` | `POST /ecdsa/keys/{keyID}/recoverydata` | `POST /ecdsa/keys/{keyID}/recoveryinfo` |
+| `client.Schnorr().GenerateRecoveryData(ctx, session, keyID, rsaPublicKey, label)` | `POST /frost/keys/{keyID}/recoverydata` | `POST /schnorr/keys/{keyID}/recoveryinfo` |
 
 `Configuration{URL: ...}.WithAPIKeyAuthentication(...)`、`NewClient`、`GenerateSessionID`、`NewSessionConfig` 和 `NewStaticSessionConfig` 沿用 Blockdaemon 的调用形状。每个客户端连接一个节点，初始化读取 `/version` 和 `/info/protocols`。会话玩家采用教程里的零起始索引。本机默认的 `mpc-node-api` 节点 ID 是 `1,2,3`，SDK 探测到对象格式的协议描述时自动转换编号。
 
@@ -94,6 +96,14 @@ replace gitlab.com/Blockdaemon/go-tsm-sdkv2/v73 => ../go-mpc-sdk
 按顺序把导出结果的 `WrappedKeyShare`、`WrappedChainCode`、`JSONPublicKey` 传给导入方法。`mpc-node-api` 的完整加密包在 `WrappedKeyShare` 中，chain code 已加密包含在包内，`WrappedChainCode` 为空。两种服务的加密包分别用于各自的导入接口。
 
 导出的密钥在目标上成为新的根密钥。若导出的是源密钥的 `m/0/1`，对目标密钥传 `nil` 路径会得到源 `m/0/1` 的公钥。连接 `mpc-node-api` 时，传入 `JSONPublicKey` 会在节点保存后核对导入的根公钥。如果这一步失败，SDK 同时返回已导入的 ID 和错误，应先核对该 ID 的实际公钥再使用。
+
+## 紧急恢复数据
+
+在参与节点的 `emergencyRecovery` 配置中启用功能，并把同一把 RSA 恢复公钥放入白名单。选择至少 `threshold + 1` 个当前分片持有者，用相同的会话、`keyID`、`*rsa.PublicKey` 和 `label` 并发调用 `GenerateRecoveryData`。该方法生成根密钥的加密恢复数据。
+
+将每个节点返回的 JSON 字节分别保存成文件。对于 `mpc-node-api`，可以直接交给仓库中的 `cmd/mpc-recovery`，使用事先可信保存的根公钥核对恢复证明，再用节点外保管的 RSA 私钥离线恢复。离线工具的可信公钥文件使用 `{"curve":"...","publicKey":"..."}`，其中 `publicKey` 对应 SDK 的 `PublicKey` 结果里的 `point`。合并和验证时使用与生成时相同的标签。
+
+SDK 沿用 Builder Vault 的方法签名。两个后端返回各自的恢复数据格式，使用对应后端的离线工具。
 
 ## 本地示例
 
