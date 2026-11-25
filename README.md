@@ -31,6 +31,8 @@
 | `client.Schnorr().ImportKeyShare(ctx, wrappedShare)` | `POST /frost/keys/importkeyshare` | `POST /schnorr/keys/importkeyshare` |
 | `client.ECDSA().GenerateRecoveryData(ctx, session, keyID, rsaPublicKey, label)` | `POST /ecdsa/keys/{keyID}/recoverydata` | `POST /ecdsa/keys/{keyID}/recoveryinfo` |
 | `client.Schnorr().GenerateRecoveryData(ctx, session, keyID, rsaPublicKey, label)` | `POST /frost/keys/{keyID}/recoverydata` | `POST /schnorr/keys/{keyID}/recoveryinfo` |
+| `client.CreateWallet(ctx, session, backupPublicKeys)` | `POST /wallets` | — |
+| `client.GetWalletBackup(ctx, walletID)` | `GET /wallets/{walletID}/backup` | — |
 
 `Configuration{URL: ...}.WithAPIKeyAuthentication(...)`、`NewClient`、`GenerateSessionID`、`NewSessionConfig` 和 `NewStaticSessionConfig` 沿用 Blockdaemon 的调用形状。每个客户端连接一个节点，初始化读取 `/version` 和 `/info/protocols`。会话玩家采用教程里的零起始索引。本机默认的 `mpc-node-api` 节点 ID 是 `1,2,3`，SDK 探测到对象格式的协议描述时自动转换编号。
 
@@ -114,6 +116,15 @@ replace gitlab.com/Blockdaemon/go-tsm-sdkv2/v73 => ../go-mpc-sdk
 将每个节点返回的 JSON 字节分别保存成文件。对于 `mpc-node-api`，可以直接交给仓库中的 `cmd/mpc-recovery`，使用事先可信保存的根公钥核对恢复证明，再用节点外保管的 RSA 私钥离线恢复。离线工具的可信公钥文件使用 `{"curve":"...","publicKey":"..."}`，其中 `publicKey` 对应 SDK 的 `PublicKey` 结果里的 `point`。合并和验证时使用与生成时相同的标签。
 
 SDK 沿用 Builder Vault 的方法签名。两个后端返回各自的恢复数据格式，使用对应后端的离线工具。
+
+## 助记词钱包
+
+`CreateWallet(ctx, session, backupPublicKeys)` 通过 `mpc-node-api` 创建 ECDSA 和 Ed25519 两把 3 签 3 根密钥。三个节点的 API Key 对应同一个应用。向三个节点并发调用，使用相同的会话和公钥映射，收齐并核对三份 `WalletReceipt` 后再使用密钥。
+
+- 固定公钥模式传 `nil`，各节点使用自己的 `walletBackup.publicKey`。
+- 按钱包指定公钥时，三个节点开启 `walletBackup.allowRequestPublicKeys`，SDK 参数传 `map[int][]byte{0: rsaDER1, 1: rsaDER2, 2: rsaDER3}`。索引沿用 SDK 的零起始编号，值是对应保管人的 RSA 公钥 PKIX DER 字节。SDK 会把索引转换为节点的 `partyID`，并以 Base64 编码公钥。
+
+拿到 `WalletID` 后，分别调用每个节点客户端的 `GetWalletBackup(ctx, walletID)` 取得三份备份。每次调用返回当前节点的 `WalletBackup`。其中 `WrappedKey`、`Ciphertext`、`AAD` 已从 Base64 解为字节，`Manifest` 保留原 JSON 结构。可以把各份备份重新编码成 JSON 保存，按 `BackupKeyID` 找到对应的外部 RSA 私钥执行离线解封。
 
 ## 本地示例
 
