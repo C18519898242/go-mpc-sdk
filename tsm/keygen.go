@@ -12,16 +12,18 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
-// ECDSAAPI implements ordinary Secp256k1 key creation and public key lookup.
+// ECDSAAPI provides Secp256k1 key creation, public key lookup and online signing.
 type ECDSAAPI interface {
 	GenerateKey(ctx context.Context, sessionConfig *SessionConfig, threshold int, curveName, desiredKeyID string) (string, error)
 	PublicKey(ctx context.Context, keyID string, derivationPath []uint32) ([]byte, error)
+	Sign(ctx context.Context, sessionConfig *SessionConfig, keyID string, derivationPath []uint32, messageHash []byte) (*ECDSAPartialSignResult, error)
 }
 
-// SchnorrAPI implements ordinary Ed25519 key creation and public key lookup.
+// SchnorrAPI provides Ed25519 key creation, public key lookup and online signing.
 type SchnorrAPI interface {
 	GenerateKey(ctx context.Context, sessionConfig *SessionConfig, threshold int, schnorrVariant, desiredKeyID string) (string, error)
 	PublicKey(ctx context.Context, keyID string, derivationPath []uint32) ([]byte, error)
+	Sign(ctx context.Context, sessionConfig *SessionConfig, keyID string, derivationPath []uint32, message []byte) (*SchnorrPartialSignResult, error)
 }
 
 // SchnorrEd25519 selects the Ed25519 variant of the Schnorr API.
@@ -134,12 +136,14 @@ func (c *Client) publicKey(ctx context.Context, endpoint, scheme, keyID string, 
 		}
 		curve, point = "ED-25519", key.Bytes()
 	}
-	// v73.5.2 returns the serialized SDK public-key envelope.
-	return json.Marshal(struct {
-		Scheme string `json:"scheme"`
-		Curve  string `json:"curve"`
-		Point  []byte `json:"point"`
-	}{scheme, curve, point})
+	return json.Marshal(encodedPublicKey{scheme, curve, point})
+}
+
+// v73.5.2 returns this serialized SDK public-key envelope.
+type encodedPublicKey struct {
+	Scheme string `json:"scheme"`
+	Curve  string `json:"curve"`
+	Point  []byte `json:"point"`
 }
 
 func validEd25519Point(point *edwards25519.Point) bool {

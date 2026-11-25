@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,8 +21,26 @@ func main() {
 	algorithm := flag.String("algorithm", "ecdsa", "ecdsa or ed25519")
 	threshold := flag.Int("threshold", 1, "security threshold: required signers minus one")
 	keyID := flag.String("key-id", "", "optional key ID shared by all players")
+	message := flag.String("message", "", "message to sign after key generation")
+	chainPath := flag.String("chain-path", "", "comma-separated non-hardened child indices for signing")
 	flag.Parse()
-	if err := run(strings.Split(*addresses, ","), *algorithm, *threshold, *keyID); err != nil {
+	var signMessage []byte
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "message" {
+			signMessage = []byte(*message)
+		}
+	})
+	var path []uint32
+	if *chainPath != "" {
+		for _, value := range strings.Split(*chainPath, ",") {
+			index, err := strconv.ParseUint(value, 10, 31)
+			if err != nil {
+				log.Fatalf("invalid chain-path index %q", value)
+			}
+			path = append(path, uint32(index))
+		}
+	}
+	if err := run(strings.Split(*addresses, ","), *algorithm, *threshold, *keyID, signMessage, path); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -30,7 +50,7 @@ type keyService interface {
 	PublicKey(context.Context, string, []uint32) ([]byte, error)
 }
 
-func run(addresses []string, algorithm string, threshold int, desiredID string) error {
+func run(addresses []string, algorithm string, threshold int, desiredID string, message []byte, path []uint32) error {
 	var variant string
 	switch algorithm {
 	case "ecdsa":
@@ -44,6 +64,7 @@ func run(addresses []string, algorithm string, threshold int, desiredID string) 
 		return fmt.Errorf("threshold must be between 1 and the number of nodes minus 1")
 	}
 	services := make([]keyService, len(addresses))
+	clients := make([]*tsm.Client, len(addresses))
 	for i, address := range addresses {
 		env := fmt.Sprintf("MPC_NODE_API_KEY_%d", i+1)
 		apiKey := os.Getenv(env)
@@ -55,6 +76,7 @@ func run(addresses []string, algorithm string, threshold int, desiredID string) 
 		if err != nil {
 			return fmt.Errorf("player %d: %w", i, err)
 		}
+		clients[i] = client
 		if algorithm == "ecdsa" {
 			services[i] = client.ECDSA()
 		} else {
@@ -94,5 +116,69 @@ func run(addresses []string, algorithm string, threshold int, desiredID string) 
 		publicKey = key
 	}
 	fmt.Printf("%s keyID=%s\npublicKey=%s\n", algorithm, ids[0], publicKey)
+	if message != nil {
+		// The first threshold+1 nodes are enough to sign.
+		return signAndVerify(ctx, clients[:threshold+1], algorithm, ids[0], path, message)
+	}
+	return nil
+}
+
+func signAndVerify(ctx context.Context, signers []*tsm.Client, algorithm, keyID string, path []uint32, message []byte) error {
+	session := tsm.NewStaticSessionConfig(tsm.GenerateSessionID(), len(signers))
+	digest := sha256.Sum256(message)
+	parts, failures := make([][]byte, len(signers)), make([]error, len(signers))
+	var wg sync.WaitGroup
+	for i, client := range signers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if algorithm == "ecdsa" {
+				result, err := client.ECDSA().Sign(ctx, session, keyID, path, digest[:])
+				failures[i] = err
+				if err == nil {
+					parts[i] = result.PartialSignature
+				}
+			} else {
+				result, err := client.Schnorr().Sign(ctx, session, keyID, path, message)
+				failures[i] = err
+				if err == nil {
+					parts[i] = result.PartialSignature
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	for i, err := range failures {
+		if err != nil {
+			return fmt.Errorf("sign session %s, player %d: %w", session.SessionID(), i, err)
+		}
+	}
+	if algorithm == "ecdsa" {
+		signature, err := tsm.ECDSAFinalizeSignature(digest[:], parts)
+		if err != nil {
+			return err
+		}
+		public, err := signers[0].ECDSA().PublicKey(ctx, keyID, path)
+		if err != nil {
+			return err
+		}
+		if err := tsm.ECDSAVerifySignature(public, digest[:], signature.ASN1()); err != nil {
+			return err
+		}
+		fmt.Printf("signature=%x\nrecoveryID=%d\n", signature.ASN1(), signature.RecoveryID())
+		return nil
+	}
+	signature, err := tsm.SchnorrFinalizeSignature(message, parts)
+	if err != nil {
+		return err
+	}
+	public, err := signers[0].Schnorr().PublicKey(ctx, keyID, path)
+	if err != nil {
+		return err
+	}
+	if err := tsm.SchnorrVerifySignature(public, message, signature); err != nil {
+		return err
+	}
+	fmt.Printf("signature=%x\n", signature)
 	return nil
 }
