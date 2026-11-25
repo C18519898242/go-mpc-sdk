@@ -203,7 +203,7 @@ func (c *Client) request(ctx context.Context, method, path string, session *Sess
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("%w: %s %s returned HTTP %d", statusError(response.StatusCode), method, path, response.StatusCode)
 	}
-	if len(data) > maxResponse || json.Unmarshal(data, output) != nil {
+	if len(data) > maxResponse || (output != nil && json.Unmarshal(data, output) != nil) {
 		return fmt.Errorf("%w: invalid JSON response from %s", ErrOperationFailed, path)
 	}
 	return nil

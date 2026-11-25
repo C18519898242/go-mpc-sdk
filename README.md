@@ -14,6 +14,9 @@
 | `client.Schnorr().GeneratePresignatures(ctx, session, keyID, count)` | `POST /frost/keys/{keyID}/{count}/presiggen` | `POST /schnorr/keys/{keyID}/{count}/presiggen` |
 | `client.ECDSA().SignWithPresignature(ctx, keyID, id, path, digest)` | `POST /ecdsa/keys/{keyID}/signwithpresig` | 同左 |
 | `client.Schnorr().SignWithPresignature(ctx, keyID, id, path, message)` | `POST /frost/keys/{keyID}/signwithpresig` | `POST /schnorr/keys/{keyID}/signwithpresig` |
+| `client.KeyManagement().CountPresignatures(ctx, keyID)` | `POST /key/{keyID}/count/presigs` | 同左 |
+| `client.KeyManagement().DeletePresignatures(ctx, keyID)` | `DELETE /key/{keyID}/presigs` | 同左 |
+| `client.KeyManagement().DeleteKeyShare(ctx, keyID)` | `DELETE /key/{keyID}` | 同左 |
 
 `Configuration{URL: ...}.WithAPIKeyAuthentication(...)`、`NewClient`、`GenerateSessionID`、`NewSessionConfig` 和 `NewStaticSessionConfig` 沿用 Blockdaemon 的调用形状。每个客户端连接一个节点，初始化读取 `/version` 和 `/info/protocols`。会话玩家采用教程里的零起始索引。本机默认的 `mpc-node-api` 节点 ID 是 `1,2,3`，SDK 探测到对象格式的协议描述时自动转换编号。
 
@@ -53,6 +56,12 @@ replace gitlab.com/Blockdaemon/go-tsm-sdkv2/v73 => ../go-mpc-sdk
 1. 用一个新会话向同组节点并发调用 `GeneratePresignatures`。各节点保存各自的预签名材料，调用方核对各节点返回的有序 ID 列表一致。`mpc-node-api` 单批支持 1 至 8 份。
 2. 从本组的批次中选一个共同的 ID，每个节点分别调用 `SignWithPresignature`。这一步无需 MPC 会话或节点间通讯。各节点使用相同的 ID、路径和待签数据。如果首个节点的所有可用预签名都属于本组，也可以传空 ID，再把它返回的 `PresignatureID` 传给其余节点。
 3. 收齐该 ID 对应的所有分片，调用 `ECDSAFinalizeSignature` 或 `SchnorrFinalizeSignature`。验签时使用同一路径的公钥。每个预签名 ID 在每个节点只能消费一次。如果消费请求超时且签名分片未收到，整组换一个 ID 重签。
+
+`client.KeyManagement().CountPresignatures(ctx, keyID)` 查询当前节点的可用库存，`DeletePresignatures(ctx, keyID)` 清理当前节点该密钥的库存。清理整组库存时，分别调用各节点的客户端。两个方法都无需 MPC 会话，密钥分片可以继续签名和生成新的预签名。
+
+## 删除密钥分片
+
+`client.KeyManagement().DeleteKeyShare(ctx, keyID)` 删除当前节点上该密钥的分片和预签名。节点按 API Key 对应的应用执行删除。若同一应用内 ECDSA 和 Ed25519 共用该 `keyID`，两种算法的本地分片都会删除。删除整组分片时，分别调用持有分片的节点。
 
 ## 本地示例
 
