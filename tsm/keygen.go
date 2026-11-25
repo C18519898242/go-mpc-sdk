@@ -26,6 +26,10 @@ type ECDSAAPI interface {
 	// ImportKey imports this player's share in a fresh MPC session and returns the new key ID.
 	// For mpc-node-api, a post-import public-key check can return a committed ID and an error.
 	ImportKey(ctx context.Context, sessionConfig *SessionConfig, threshold int, wrappedKeyShare, wrappedChainCode, jsonPublicKey []byte, desiredKeyID string) (string, error)
+	// ExportKeyShare backs up this node's share. mpc-node-api requires includePresignatures to be false.
+	ExportKeyShare(ctx context.Context, keyID string, includePresignatures bool, wrappingKey []byte) ([]byte, error)
+	// ImportKeyShare restores a local backup and returns its original key ID.
+	ImportKeyShare(ctx context.Context, wrappedKeyShare []byte) (string, error)
 	PublicKey(ctx context.Context, keyID string, derivationPath []uint32) ([]byte, error)
 	// GenerateRecoveryData returns this player's encrypted recovery data for the root key.
 	GenerateRecoveryData(ctx context.Context, sessionConfig *SessionConfig, keyID string, ersPublicKey *rsa.PublicKey, ersLabel []byte) ([]byte, error)
@@ -50,6 +54,10 @@ type SchnorrAPI interface {
 	// ImportKey imports this player's share in a fresh MPC session and returns the new key ID.
 	// For mpc-node-api, a post-import public-key check can return a committed ID and an error.
 	ImportKey(ctx context.Context, sessionConfig *SessionConfig, threshold int, wrappedKeyShare, wrappedChainCode, jsonPublicKey []byte, desiredKeyID string) (string, error)
+	// ExportKeyShare backs up this node's share. mpc-node-api requires includePresignatures to be false.
+	ExportKeyShare(ctx context.Context, keyID string, includePresignatures bool, wrappingKey []byte) ([]byte, error)
+	// ImportKeyShare restores a local backup and returns its original key ID.
+	ImportKeyShare(ctx context.Context, wrappedKeyShare []byte) (string, error)
 	PublicKey(ctx context.Context, keyID string, derivationPath []uint32) ([]byte, error)
 	// GenerateRecoveryData returns this player's encrypted recovery data for the root key.
 	GenerateRecoveryData(ctx context.Context, sessionConfig *SessionConfig, keyID string, ersPublicKey *rsa.PublicKey, ersLabel []byte) ([]byte, error)
@@ -119,6 +127,10 @@ func (c *Client) requestNewKeyID(ctx context.Context, path string, session *Sess
 	if session == nil || threshold < 1 || threshold >= len(session.players) {
 		return "", fmt.Errorf("%w: threshold must be between 1 and the number of players minus 1", ErrInvalidInput)
 	}
+	return c.requestKeyID(ctx, path, session, desiredID, request)
+}
+
+func (c *Client) requestKeyID(ctx context.Context, path string, session *SessionConfig, desiredID string, request any) (string, error) {
 	if desiredID != "" && !keyIDPattern.MatchString(desiredID) {
 		return "", fmt.Errorf("%w: invalid key ID", ErrInvalidInput)
 	}

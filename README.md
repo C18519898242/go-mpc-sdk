@@ -25,6 +25,10 @@
 | `client.Schnorr().ExportKey(ctx, session, keyID, path, wrappingKey)` | `POST /frost/keys/{keyID}/exportkey` | `POST /schnorr/keys/{keyID}/exportkey` |
 | `client.ECDSA().ImportKey(ctx, session, threshold, share, chainCode, publicKey, targetID)` | `POST /ecdsa/keys/importkey` | 同左 |
 | `client.Schnorr().ImportKey(ctx, session, threshold, share, chainCode, publicKey, targetID)` | `POST /frost/keys/importkey` | `POST /schnorr/keys/importkey` |
+| `client.ECDSA().ExportKeyShare(ctx, keyID, false, wrappingKey)` | `POST /ecdsa/keys/{keyID}/exportkeyshare` | 同左 |
+| `client.Schnorr().ExportKeyShare(ctx, keyID, false, wrappingKey)` | `POST /frost/keys/{keyID}/exportkeyshare` | `POST /schnorr/keys/{keyID}/exportkeyshare` |
+| `client.ECDSA().ImportKeyShare(ctx, wrappedShare)` | `POST /ecdsa/keys/importkeyshare` | 同左 |
+| `client.Schnorr().ImportKeyShare(ctx, wrappedShare)` | `POST /frost/keys/importkeyshare` | `POST /schnorr/keys/importkeyshare` |
 | `client.ECDSA().GenerateRecoveryData(ctx, session, keyID, rsaPublicKey, label)` | `POST /ecdsa/keys/{keyID}/recoverydata` | `POST /ecdsa/keys/{keyID}/recoveryinfo` |
 | `client.Schnorr().GenerateRecoveryData(ctx, session, keyID, rsaPublicKey, label)` | `POST /frost/keys/{keyID}/recoverydata` | `POST /schnorr/keys/{keyID}/recoveryinfo` |
 
@@ -96,6 +100,12 @@ replace gitlab.com/Blockdaemon/go-tsm-sdkv2/v73 => ../go-mpc-sdk
 按顺序把导出结果的 `WrappedKeyShare`、`WrappedChainCode`、`JSONPublicKey` 传给导入方法。`mpc-node-api` 的完整加密包在 `WrappedKeyShare` 中，chain code 已加密包含在包内，`WrappedChainCode` 为空。两种服务的加密包分别用于各自的导入接口。
 
 导出的密钥在目标上成为新的根密钥。若导出的是源密钥的 `m/0/1`，对目标密钥传 `nil` 路径会得到源 `m/0/1` 的公钥。连接 `mpc-node-api` 时，传入 `JSONPublicKey` 会在节点保存后核对导入的根公钥。如果这一步失败，SDK 同时返回已导入的 ID 和错误，应先核对该 ID 的实际公钥再使用。
+
+## 单节点分片备份和恢复
+
+`ExportKeyShare(ctx, keyID, false, wrappingKey)` 返回当前节点原始分片的 RSA 加密备份。源节点需启用 `keyTransfer.exportEnabled`，并允许指定的 RSA 公钥（SPKI DER）。保存返回的字节，使用同一算法的 `ImportKeyShare(ctx, wrappedShare)` 恢复。不需要 MPC 会话。
+
+对于 `mpc-node-api`，在同一 `partyId`、同一 API Key 所属应用下恢复，由该节点配置的 RSA 私钥解包，返回原 `keyID`。备份只包含密钥分片，`includePresignatures` 传 `false`。分片刷新后重新备份，确保恢复的分片与其他节点属于同一次分享。
 
 ## 紧急恢复数据
 

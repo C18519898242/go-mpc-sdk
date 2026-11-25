@@ -33,6 +33,23 @@ func (s nativeWrappedKeyShare) valid() bool {
 		len(s.Ciphertext) >= 28 && len(s.Ciphertext) <= 1<<18
 }
 
+func parseNativeWrappedKeyShare(data []byte) (nativeWrappedKeyShare, bool) {
+	var share nativeWrappedKeyShare
+	ok := len(data) <= maxKeyTransferResponse && json.Unmarshal(data, &share) == nil && share.valid()
+	return share, ok
+}
+
+func (c *Client) requestWrappedKeyShare(ctx context.Context, path string, session *SessionConfig, request any) ([]byte, error) {
+	var raw json.RawMessage
+	if err := c.requestWithLimit(ctx, http.MethodPost, path, session, request, &raw, maxKeyTransferResponse); err != nil {
+		return nil, err
+	}
+	if _, ok := parseNativeWrappedKeyShare(raw); !ok {
+		return nil, fmt.Errorf("%w: invalid exported key envelope", ErrOperationFailed)
+	}
+	return raw, nil
+}
+
 func (s *ecdsaService) ExportKey(ctx context.Context, session *SessionConfig, keyID string, path []uint32, wrappingKey []byte) (*ECDSAWrappedKeyShare, error) {
 	return s.client.exportKey(ctx, "/ecdsa/keys", "ECDSA", session, keyID, path, wrappingKey)
 }
@@ -60,15 +77,11 @@ func (c *Client) exportKey(ctx context.Context, endpoint, scheme string, session
 		if err != nil {
 			return nil, err
 		}
-		var raw json.RawMessage
-		if err := c.requestWithLimit(ctx, http.MethodPost, route, session, request, &raw, maxKeyTransferResponse); err != nil {
+		wrapped, err := c.requestWrappedKeyShare(ctx, route, session, request)
+		if err != nil {
 			return nil, err
 		}
-		var share nativeWrappedKeyShare
-		if json.Unmarshal(raw, &share) != nil || !share.valid() {
-			return nil, fmt.Errorf("%w: invalid exported key envelope", ErrOperationFailed)
-		}
-		return &ECDSAWrappedKeyShare{WrappedKeyShare: raw, JSONPublicKey: public}, nil
+		return &ECDSAWrappedKeyShare{WrappedKeyShare: wrapped, JSONPublicKey: public}, nil
 	}
 	var response struct {
 		publicKeyResponse
@@ -117,9 +130,8 @@ func (c *Client) importKey(ctx context.Context, endpoint, scheme string, session
 	}
 	route := endpoint + "/importkey"
 	if c.native {
-		var wrapped nativeWrappedKeyShare
-		if len(bundle.WrappedChainCode) != 0 || len(bundle.WrappedKeyShare) > maxKeyTransferResponse ||
-			json.Unmarshal(bundle.WrappedKeyShare, &wrapped) != nil || !wrapped.valid() {
+		wrapped, ok := parseNativeWrappedKeyShare(bundle.WrappedKeyShare)
+		if len(bundle.WrappedChainCode) != 0 || !ok {
 			return "", fmt.Errorf("%w: expected an mpc-node-api wrapped key envelope", ErrInvalidInput)
 		}
 		request := struct {
