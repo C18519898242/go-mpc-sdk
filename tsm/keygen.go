@@ -15,6 +15,11 @@ import (
 // ECDSAAPI provides Secp256k1 key creation, public key lookup and signing.
 type ECDSAAPI interface {
 	GenerateKey(ctx context.Context, sessionConfig *SessionConfig, threshold int, curveName, desiredKeyID string) (string, error)
+	// Reshare refreshes the key's shares with all current holders.
+	Reshare(ctx context.Context, sessionConfig *SessionConfig, keyID string) error
+	// CopyKey creates a new sharing of the same key. A new holder supplies an
+	// empty sourceKeyID and the curve name. An existing holder supplies the source ID and an empty curve name.
+	CopyKey(ctx context.Context, sessionConfig *SessionConfig, sourceKeyID, curveName string, newThreshold int, desiredKeyID string) (string, error)
 	PublicKey(ctx context.Context, keyID string, derivationPath []uint32) ([]byte, error)
 	Sign(ctx context.Context, sessionConfig *SessionConfig, keyID string, derivationPath []uint32, messageHash []byte) (*ECDSAPartialSignResult, error)
 	// GeneratePresignatures participates in a shared MPC session to generate one-time signing material.
@@ -27,6 +32,11 @@ type ECDSAAPI interface {
 // SchnorrAPI provides Ed25519 key creation, public key lookup and signing.
 type SchnorrAPI interface {
 	GenerateKey(ctx context.Context, sessionConfig *SessionConfig, threshold int, schnorrVariant, desiredKeyID string) (string, error)
+	// Reshare refreshes the key's shares with all current holders.
+	Reshare(ctx context.Context, sessionConfig *SessionConfig, keyID string) error
+	// CopyKey creates a new sharing of the same key. A new holder supplies an
+	// empty sourceKeyID and the Ed25519 variant. Existing holders use the source ID.
+	CopyKey(ctx context.Context, sessionConfig *SessionConfig, sourceKeyID, schnorrVariant string, newThreshold int, desiredKeyID string) (string, error)
 	PublicKey(ctx context.Context, keyID string, derivationPath []uint32) ([]byte, error)
 	Sign(ctx context.Context, sessionConfig *SessionConfig, keyID string, derivationPath []uint32, message []byte) (*SchnorrPartialSignResult, error)
 	// GeneratePresignatures participates in a shared MPC session to generate one-time signing material.
@@ -75,7 +85,7 @@ func (s *ecdsaService) GenerateKey(ctx context.Context, session *SessionConfig, 
 	if curve != "secp256k1" {
 		return "", fmt.Errorf("%w: ECDSA key creation supports secp256k1", ErrInvalidInput)
 	}
-	return s.client.generateKey(ctx, "/ecdsa/keys", session, keygenRequest{Threshold: threshold, Curve: curve, KeyID: desiredID})
+	return s.client.requestNewKeyID(ctx, "/ecdsa/keys", session, keygenRequest{Threshold: threshold, Curve: curve, KeyID: desiredID})
 }
 
 func (s *schnorrService) GenerateKey(ctx context.Context, session *SessionConfig, threshold int, variant, desiredID string) (string, error) {
@@ -86,10 +96,10 @@ func (s *schnorrService) GenerateKey(ctx context.Context, session *SessionConfig
 	if s.client.native {
 		request.Variant, request.Curve = "", "ed25519"
 	}
-	return s.client.generateKey(ctx, s.path, session, request)
+	return s.client.requestNewKeyID(ctx, s.path, session, request)
 }
 
-func (c *Client) generateKey(ctx context.Context, path string, session *SessionConfig, req keygenRequest) (string, error) {
+func (c *Client) requestNewKeyID(ctx context.Context, path string, session *SessionConfig, req keygenRequest) (string, error) {
 	if session == nil || req.Threshold < 1 || req.Threshold >= len(session.players) {
 		return "", fmt.Errorf("%w: threshold must be between 1 and the number of players minus 1", ErrInvalidInput)
 	}

@@ -17,6 +17,10 @@
 | `client.KeyManagement().CountPresignatures(ctx, keyID)` | `POST /key/{keyID}/count/presigs` | 同左 |
 | `client.KeyManagement().DeletePresignatures(ctx, keyID)` | `DELETE /key/{keyID}/presigs` | 同左 |
 | `client.KeyManagement().DeleteKeyShare(ctx, keyID)` | `DELETE /key/{keyID}` | 同左 |
+| `client.ECDSA().Reshare(ctx, session, keyID)` | `POST /ecdsa/keys/{keyID}/reshare` | 同左 |
+| `client.Schnorr().Reshare(ctx, session, keyID)` | `POST /frost/keys/{keyID}/reshare` | `POST /schnorr/keys/{keyID}/reshare` |
+| `client.ECDSA().CopyKey(ctx, session, sourceID, curve, threshold, targetID)` | `POST /ecdsa/keys/{sourceKeyID}/keycopy` | 同左 |
+| `client.Schnorr().CopyKey(ctx, session, sourceID, variant, threshold, targetID)` | `POST /frost/keys/{sourceKeyID}/keycopy` | `POST /schnorr/keys/{sourceKeyID}/keycopy` |
 
 `Configuration{URL: ...}.WithAPIKeyAuthentication(...)`、`NewClient`、`GenerateSessionID`、`NewSessionConfig` 和 `NewStaticSessionConfig` 沿用 Blockdaemon 的调用形状。每个客户端连接一个节点，初始化读取 `/version` 和 `/info/protocols`。会话玩家采用教程里的零起始索引。本机默认的 `mpc-node-api` 节点 ID 是 `1,2,3`，SDK 探测到对象格式的协议描述时自动转换编号。
 
@@ -62,6 +66,21 @@ replace gitlab.com/Blockdaemon/go-tsm-sdkv2/v73 => ../go-mpc-sdk
 ## 删除密钥分片
 
 `client.KeyManagement().DeleteKeyShare(ctx, keyID)` 删除当前节点上该密钥的分片和预签名。节点按 API Key 对应的应用执行删除。若同一应用内 ECDSA 和 Ed25519 共用该 `keyID`，两种算法的本地分片都会删除。删除整组分片时，分别调用持有分片的节点。
+
+## 刷新和复制密钥分片
+
+**刷新。** 用一个新会话向所有原分片持有者并发调用 `Reshare(ctx, session, keyID)`。全部节点返回成功后继续签名。刷新保留原 `keyID`、根公钥、派生公钥和阈值，原预签名失效，分片需要重新备份。若仅部分节点返回成功，用原会话向全组重发。
+
+**复制。** 用一个新会话向目标组全员并发调用 `CopyKey`。目标组至少包含 `原阈值 + 1` 位原持有者。所有节点传同一个目标阈值和目标 ID，全员传空目标 ID 时由节点生成。收齐成功响应并核对返回的副本 ID 一致后，再用新 ID 签名。
+
+例如原分片在 1、3 号节点，复制到 1、2、3 号节点。会话的 SDK 玩家索引是 `[]int{0, 1, 2}`。下表省略前两个参数 `ctx, session`。
+
+| 算法 | 原持有者 1、3 | 新加入节点 2 |
+| --- | --- | --- |
+| ECDSA | `CopyKey(sourceID, "", 2, targetID)` | `CopyKey("", "secp256k1", 2, targetID)` |
+| Ed25519 | `CopyKey(sourceID, "", 2, targetID)` | `CopyKey("", tsm.SchnorrEd25519, 2, targetID)` |
+
+示例中的新阈值 `2` 要求三个节点共同签名。副本使用独立分片，原密钥和副本对应相同的根公钥及派生公钥。
 
 ## 本地示例
 
