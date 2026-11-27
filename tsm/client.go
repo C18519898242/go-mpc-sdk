@@ -23,24 +23,34 @@ type Configuration struct {
 	URL string
 
 	apiKey            string
+	requireHTTPS      bool
 	rsaDecryptionAuth bool
 	rootCAFile        string
 	disableKeepAlives bool
 }
 
 // WithAPIKeyAuthentication returns a copy using API Key authentication.
+// Use WithHTTPSAuthentication for direct TLS from the first discovery request.
 // Use WithRSADecryptionAuthentication for credentials with RSA decryption permission.
 func (c Configuration) WithAPIKeyAuthentication(apiKey string) *Configuration {
 	c.apiKey = apiKey
 	return &c
 }
 
+// WithHTTPSAuthentication configures an API key and connects directly over
+// HTTPS, including during discovery.
+func (c Configuration) WithHTTPSAuthentication(apiKey string) *Configuration {
+	c.apiKey = apiKey
+	c.requireHTTPS = true
+	return &c
+}
+
 // WithRSADecryptionAuthentication configures an API key for RSA-OAEP
 // decryption and connects directly over HTTPS, including during discovery.
 func (c Configuration) WithRSADecryptionAuthentication(apiKey string) *Configuration {
-	c.apiKey = apiKey
-	c.rsaDecryptionAuth = true
-	return &c
+	cfg := c.WithHTTPSAuthentication(apiKey)
+	cfg.rsaDecryptionAuth = true
+	return cfg
 }
 
 // WithRootCAFile returns a copy that trusts the PEM roots in the specified file.
@@ -77,14 +87,14 @@ func NewClient(cfg *Configuration) (*Client, error) {
 		base.User != nil || base.RawQuery != "" || base.ForceQuery || base.Fragment != "" {
 		return nil, fmt.Errorf("%w: expected an HTTP(S) node URL with no credentials, query or fragment", ErrInvalidInput)
 	}
-	if cfg.rsaDecryptionAuth && base.Scheme != "https" {
-		return nil, fmt.Errorf("%w: RSA decryption credentials require HTTPS", ErrInvalidInput)
+	if cfg.requireHTTPS && base.Scheme != "https" {
+		return nil, fmt.Errorf("%w: this API key configuration requires HTTPS", ErrInvalidInput)
 	}
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true}
 	if standard, ok := http.DefaultTransport.(*http.Transport); ok && standard != nil {
 		transport = standard.Clone()
 	}
-	if cfg.rsaDecryptionAuth {
+	if cfg.requireHTTPS {
 		transport.Proxy = nil
 	}
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}

@@ -24,6 +24,8 @@ type RSAAPI interface {
 	// GenerateDecryptionKey generates a key dedicated to RSA-OAEP decryption over HTTPS.
 	// It uses the same session and threshold conventions as GenerateKey.
 	GenerateDecryptionKey(ctx context.Context, session *SessionConfig, threshold, bits int, desiredKeyID string) (string, error)
+	// ImportKey installs this player's encrypted share of an external signing key.
+	ImportKey(ctx context.Context, session *SessionConfig, wrappedKeyShare []byte, desiredKeyID string) (string, error)
 	// PublicKey returns the RSA public key as SPKI DER, matching Builder Vault.
 	PublicKey(ctx context.Context, keyID string) ([]byte, error)
 	// PublicKeyInfo returns the mpc-node-api public key and its signing parameters.

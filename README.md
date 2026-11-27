@@ -138,6 +138,16 @@ SDK 沿用 Builder Vault 的方法签名。两个后端返回各自的恢复数�
 
 SDK 使用 CIRCL fork 的 RSA 子模块 v0.1.0 合并 RSA 签名和解密分片，构建 SDK 需要 Go 1.25 或更新版本。
 
+### 导入外部 RSA 签名密钥
+
+`client.RSA().ImportKey(ctx, session, wrappedKeyShare, desiredKeyID)` 支持从外部导入 RSA 签名密钥。完整私钥留在离线分片环境。先调用 `tsm.RSASecretShare(threshold, players, privateKey)`，再用不同节点的包装公钥分别调用 `tsm.RSAWrapKeyShare(wrappingPublicKeyDER, shares[player])`。完成包装后清理明文分片缓冲区。
+
+导入需要 2048、3072 或 4096 位、公钥指数 65537、两个不同且等长的安全素数。普通 RSA 工具随机生成的密钥通常不满足安全素数条件。此接口导入签名专用密钥，分片采用本项目的 CIRCL 格式。包装公钥使用目标节点已配置私钥对应的可信 SPKI DER，例如节点部署时生成的 `rsa-public.der`。
+
+三节点示例使用 `players := []int{0, 1, 2}`、`threshold := 1`。创建一个 `tsm.NewStaticSessionConfig(tsm.GenerateSessionID(), 3)`，通过 HTTPS 向每台参与节点并发调用 `ImportKey`，传入它对应的加密分片和相同的 `desiredKeyID`。收齐所有成功响应后，确认 `keyID` 和各节点返回的公钥与离线原公钥一致。
+
+为导入和 PSS 签名创建客户端时，建议使用 `tsm.Configuration{URL: "https://node.example.com"}.WithHTTPSAuthentication(apiKey)`。它在探测服务前校验使用的是 HTTPS，并直连节点。节点使用内部 CA 时，可再调用 `WithRootCAFile(caPath)`。通用的 `WithAPIKeyAuthentication` 支持 HTTP，使用 HTTP 地址时会在 SDK 探测阶段发送凭据。
+
 ### RSA 公钥加密
 
 `client.RSA().PublicKey(ctx, keyID)` 对齐 Builder Vault Go SDK，返回 SPKI DER 字节。该方法适用于 `mpc-node-api` 和 Builder Vault。**升级 SDK 时**，原先从 `PublicKey` 读取 `*tsm.RSAPublicKey` 或将结果传给 `RSAFinalizeSignature` 的代码，需要改用 `PublicKeyInfo(ctx, keyID)`。
