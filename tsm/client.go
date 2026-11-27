@@ -53,6 +53,7 @@ type Client struct {
 	native  bool
 	ecdsa   ECDSAAPI
 	schnorr SchnorrAPI
+	rsa     RSAAPI
 }
 
 // NewClient authenticates to a node and discovers its key generation services.
@@ -130,7 +131,12 @@ func (c *Client) discover() error {
 	if err != nil {
 		return err
 	}
-	c.native = nativeECDSA || nativeFROST
+	_, nativeRSA, err := decodeProtocol(protocols["rsa"])
+	if err != nil {
+		return err
+	}
+	rsaSupported := nativeRSA != nil && nativeRSA.Name == "circl-tss-rsa" && nativeRSA.Version == 1
+	c.native = nativeECDSA != nil || nativeFROST != nil || rsaSupported
 	if ecdsa {
 		c.ecdsa = &ecdsaService{client: c}
 	}
@@ -139,28 +145,33 @@ func (c *Client) discover() error {
 	} else if !c.native && schnorr {
 		c.schnorr = &schnorrService{client: c, path: "/schnorr/keys"}
 	}
+	if rsaSupported {
+		c.rsa = &rsaService{client: c}
+	}
 	return nil
 }
 
-func decodeProtocol(raw json.RawMessage) (enabled, native bool, err error) {
+type nativeProtocol struct {
+	Name    string
+	Version int
+}
+
+func decodeProtocol(raw json.RawMessage) (enabled bool, native *nativeProtocol, err error) {
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
-		return false, false, nil
+		return false, nil, nil
 	}
 	if raw[0] == '{' {
-		var protocol struct {
-			Name    string
-			Version int
-		}
+		var protocol nativeProtocol
 		if err := json.Unmarshal(raw, &protocol); err == nil && protocol.Name != "" && protocol.Version > 0 {
-			return true, true, nil
+			return true, &protocol, nil
 		}
 	} else {
 		var number int
 		if err := json.Unmarshal(raw, &number); err == nil && number >= 0 {
-			return number != 0, false, nil
+			return number != 0, nil, nil
 		}
 	}
-	return false, false, fmt.Errorf("%w: invalid node protocol information", ErrOperationFailed)
+	return false, nil, fmt.Errorf("%w: invalid node protocol information", ErrOperationFailed)
 }
 
 func (c *Client) request(ctx context.Context, method, path string, session *SessionConfig, input, output any) error {

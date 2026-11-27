@@ -126,6 +126,18 @@ SDK 沿用 Builder Vault 的方法签名。两个后端返回各自的恢复数�
 
 拿到 `WalletID` 后，分别调用每个节点客户端的 `GetWalletBackup(ctx, walletID)` 取得三份备份。每次调用返回当前节点的 `WalletBackup`。其中 `WrappedKey`、`Ciphertext`、`AAD` 已从 Base64 解为字节，`Manifest` 保留原 JSON 结构。可以把各份备份重新编码成 JSON 保存，按 `BackupKeyID` 找到对应的外部 RSA 私钥执行离线解封。
 
+## RSA 门限建钥和签名
+
+`client.RSA().GenerateKey(ctx, session, threshold, bits, desiredKeyID)` 调用 `mpc-node-api` 的 `POST /rsa/keys`。沿用 SDK 的零起始玩家编号，向会话中所有节点并发调用。三节点可以用 `tsm.NewStaticSessionConfig(tsm.GenerateSessionID(), 3)` 构造共享会话。`threshold=1` 表示 2 签 3，`threshold=2` 表示 3 签 3。
+
+`bits` 支持 2048、3072、4096。`desiredKeyID` 留空时，节点根据会话生成同一个 `keyID`。收齐所有节点的成功响应，并检查 `keyID` 一致。RSA 服务由节点的 `/info/protocols` 公告，节点需要配置 MPC mTLS 和主密码。生成安全素数可能需要几分钟，请为 `ctx` 留足时间。若全组未完成，用新的会话 ID 和 `keyID` 重试。
+
+1. `client.RSA().PublicKey(ctx, keyID)` 查询 `*tsm.RSAPublicKey`，其中 `PublicKey` 为 SPKI DER，`RequiredSigners` 为最少签名节点数。
+2. 用 `sha256.Sum256(message)` 算出摘要，再对至少 `RequiredSigners` 个不同节点调用 `client.RSA().Sign(ctx, keyID, digest[:])`。每个节点返回一个部分签名，可以独立调用。
+3. `tsm.RSAFinalizeSignature(key, digest[:], partials)` 用可信公钥信息合并并验证，返回标准的 PKCS#1 v1.5 签名。也可以用 `tsm.RSAVerifySignature(key.PublicKey, digest[:], signature)` 单独验签。
+
+SDK 使用 CIRCL v1.6.5 合并 RSA 签名分片，构建 SDK 需要 Go 1.25 或更新版本。
+
 ## 本地示例
 
 先启动 `mpc-node-api` 三节点，并把各节点的 API Key 放在 `MPC_NODE_API_KEY_1`、`MPC_NODE_API_KEY_2`、`MPC_NODE_API_KEY_3`。三个凭据必须对应相同应用。以下命令在本仓库运行。
