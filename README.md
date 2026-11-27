@@ -132,11 +132,28 @@ SDK 沿用 Builder Vault 的方法签名。两个后端返回各自的恢复数�
 
 `bits` 支持 2048、3072、4096。`desiredKeyID` 留空时，节点根据会话生成同一个 `keyID`。收齐所有节点的成功响应，并检查 `keyID` 一致。RSA 服务由节点的 `/info/protocols` 公告，节点需要配置 MPC mTLS 和主密码。生成安全素数可能需要几分钟，请为 `ctx` 留足时间。若全组未完成，用新的会话 ID 和 `keyID` 重试。
 
-1. `client.RSA().PublicKey(ctx, keyID)` 查询 `*tsm.RSAPublicKey`，其中 `PublicKey` 为 SPKI DER，`RequiredSigners` 为最少签名节点数。
+1. `client.RSA().PublicKeyInfo(ctx, keyID)` 查询 `*tsm.RSAPublicKey`，其中 `PublicKey` 为 SPKI DER，`RequiredSigners` 为最少签名节点数。
 2. 用 `sha256.Sum256(message)` 算出摘要，再对至少 `RequiredSigners` 个不同节点调用 `client.RSA().Sign(ctx, keyID, digest[:])`。每个节点返回一个部分签名，可以独立调用。
 3. `tsm.RSAFinalizeSignature(key, digest[:], partials)` 用可信公钥信息合并并验证，返回标准的 PKCS#1 v1.5 签名。也可以用 `tsm.RSAVerifySignature(key.PublicKey, digest[:], signature)` 单独验签。
 
-SDK 使用 CIRCL v1.6.5 合并 RSA 签名分片，构建 SDK 需要 Go 1.25 或更新版本。
+SDK 使用 CIRCL fork 的 RSA 子模块 v0.1.0 合并 RSA 签名和解密分片，构建 SDK 需要 Go 1.25 或更新版本。
+
+### RSA 公钥加密
+
+`client.RSA().PublicKey(ctx, keyID)` 对齐 Builder Vault Go SDK，返回 SPKI DER 字节。该方法适用于 `mpc-node-api` 和 Builder Vault。**升级 SDK 时**，原先从 `PublicKey` 读取 `*tsm.RSAPublicKey` 或将结果传给 `RSAFinalizeSignature` 的代码，需要改用 `PublicKeyInfo(ctx, keyID)`。
+
+取到可信公钥后，调用 `tsm.RSAEncryptOAEP(publicKey, plaintext, label)` 在本地加密。OAEP 和 MGF1 都使用 SHA-256，解密方需要使用相同的 `label`，没有标签时传 `nil`。RSA-2048 的明文上限为 190 字节，RSA-4096 为 446 字节。
+
+### RSA-OAEP 门限解密
+
+所有带 `rsaDecryption: true` 的 API Key 都应通过 `tsm.Configuration{URL: "https://node.example.com"}.WithRSADecryptionAuthentication(apiKey)` 配置。该方式从初始化探测开始就要求 HTTPS，并直连节点。节点使用内部 CA 时，可再调用 `WithRootCAFile(caPath)`。普通的 `WithAPIKeyAuthentication` 支持 HTTP，使用它配置解密凭据会在 HTTP 探测时暴露凭据。
+
+1. 向同一建钥会话中的所有 `mpc-node-api` 节点并发调用 `client.RSA().GenerateDecryptionKey(ctx, session, threshold, bits, desiredKeyID)`，确认返回的 `keyID` 一致。建钥请求声明 `usage: "decrypt"`，生成专用解密密钥。三节点会话中，`threshold=1` 需要至少两个节点解密。建钥和获取分片均通过 HTTPS。
+2. 通过可信节点的 `client.RSA().PublicKey(ctx, keyID)` 取到 SPKI DER 公钥，用 `tsm.RSAEncryptOAEP(publicKey, plaintext, label)` 加密。
+3. 对至少 `threshold+1` 个不同的建钥参与节点分别调用 `client.RSA().Decrypt(ctx, keyID, ciphertext)`。可以独立调用，无需 MPC 会话。每个节点返回一份 `[]byte` 部分解密结果。
+4. 用 `tsm.RSAFinalizeDecryptionOAEP(tsm.HashFunctionSHA256, label, partialDecryptions)` 在本地合并，传入加密时的 `label`。调用方须确认每份结果来自预期的可信节点并对应本次请求，并对此结果保密。若经中间组件收集，须保持节点身份可验证并保护传输和存储。
+
+`Decrypt(ctx, keyID, ciphertext) ([]byte, error)` 和 `RSAFinalizeDecryptionOAEP(hashFunction string, label []byte, partialDecryptions [][]byte) ([]byte, error)` 沿用 Builder Vault 风格的调用签名。本实现使用 `mpc-node-api` 的 CIRCL 分片格式，合并时使用 `HashFunctionSHA256`（`"SHA256"`）。
 
 ## 本地示例
 

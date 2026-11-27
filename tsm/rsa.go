@@ -3,6 +3,7 @@ package tsm
 import (
 	"context"
 	"crypto"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -12,17 +13,25 @@ import (
 	"math/big"
 	"net/http"
 
-	thresholdrsa "github.com/cloudflare/circl/tss/rsa"
+	thresholdrsa "github.com/C18519898242/circl/tss/rsa"
 )
 
-// RSAAPI provides RSA threshold signing on mpc-node-api.
+// RSAAPI provides public key lookup on both backends and threshold operations on mpc-node-api.
 type RSAAPI interface {
 	// GenerateKey participates in a trusted-dealer session requiring threshold+1 signers.
 	// Every selected player must call it with the same session, threshold, size and desired ID.
 	GenerateKey(ctx context.Context, session *SessionConfig, threshold, bits int, desiredKeyID string) (string, error)
-	PublicKey(ctx context.Context, keyID string) (*RSAPublicKey, error)
+	// GenerateDecryptionKey generates a key dedicated to RSA-OAEP decryption over HTTPS.
+	// It uses the same session and threshold conventions as GenerateKey.
+	GenerateDecryptionKey(ctx context.Context, session *SessionConfig, threshold, bits int, desiredKeyID string) (string, error)
+	// PublicKey returns the RSA public key as SPKI DER, matching Builder Vault.
+	PublicKey(ctx context.Context, keyID string) ([]byte, error)
+	// PublicKeyInfo returns the mpc-node-api public key and its signing parameters.
+	PublicKeyInfo(ctx context.Context, keyID string) (*RSAPublicKey, error)
 	// Sign returns this node's partial signature for a 32-byte SHA-256 digest.
 	Sign(ctx context.Context, keyID string, digest []byte) ([]byte, error)
+	// Decrypt returns this node's partial RSA-OAEP decryption over HTTPS.
+	Decrypt(ctx context.Context, keyID string, ciphertext []byte) ([]byte, error)
 }
 
 // RSAPublicKey holds the SPKI DER public key and the parameters fixed at key creation.
@@ -43,6 +52,20 @@ func (c *Client) RSA() RSAAPI {
 type rsaService struct{ client *Client }
 
 func (s *rsaService) GenerateKey(ctx context.Context, session *SessionConfig, threshold, bits int, desiredID string) (string, error) {
+	if !s.client.native {
+		return "", fmt.Errorf("%w: RSA key generation requires mpc-node-api", ErrOperationFailed)
+	}
+	return s.generateKey(ctx, session, threshold, bits, desiredID, "")
+}
+
+func (s *rsaService) GenerateDecryptionKey(ctx context.Context, session *SessionConfig, threshold, bits int, desiredID string) (string, error) {
+	if err := s.requireDecryptionTransport(); err != nil {
+		return "", err
+	}
+	return s.generateKey(ctx, session, threshold, bits, desiredID, "decrypt")
+}
+
+func (s *rsaService) generateKey(ctx context.Context, session *SessionConfig, threshold, bits int, desiredID, usage string) (string, error) {
 	if bits != 2048 && bits != 3072 && bits != 4096 {
 		return "", fmt.Errorf("%w: RSA key size must be 2048, 3072 or 4096 bits", ErrInvalidInput)
 	}
@@ -50,25 +73,66 @@ func (s *rsaService) GenerateKey(ctx context.Context, session *SessionConfig, th
 		Threshold int    `json:"threshold"`
 		Bits      int    `json:"bits"`
 		KeyID     string `json:"keyID"`
-	}{threshold, bits, desiredID}
+		Usage     string `json:"usage,omitempty"`
+	}{threshold, bits, desiredID, usage}
 	return s.client.requestNewKeyID(ctx, "/rsa/keys", session, threshold, desiredID, request)
 }
 
-func (s *rsaService) PublicKey(ctx context.Context, keyID string) (*RSAPublicKey, error) {
-	if !keyIDPattern.MatchString(keyID) {
-		return nil, fmt.Errorf("%w: invalid RSA key ID", ErrInvalidInput)
+func (s *rsaService) PublicKey(ctx context.Context, keyID string) ([]byte, error) {
+	result, err := s.requestPublicKey(ctx, keyID)
+	if err != nil {
+		return nil, err
 	}
-	var result RSAPublicKey
-	if err := s.client.request(ctx, http.MethodPost, "/rsa/keys/"+keyID+"/publickey", nil, struct{}{}, &result); err != nil {
+	if _, err := parseRSAPublicKeyDER(result.PublicKey); err != nil {
+		return nil, signatureError("invalid RSA public key response")
+	}
+	return result.PublicKey, nil
+}
+
+func (s *rsaService) PublicKeyInfo(ctx context.Context, keyID string) (*RSAPublicKey, error) {
+	if !s.client.native {
+		return nil, fmt.Errorf("%w: RSA signing parameters require mpc-node-api", ErrOperationFailed)
+	}
+	result, err := s.requestPublicKey(ctx, keyID)
+	if err != nil {
 		return nil, err
 	}
 	if _, err := result.validate(); err != nil {
 		return nil, signatureError("invalid RSA public key response")
 	}
+	return result, nil
+}
+
+func (s *rsaService) requestPublicKey(ctx context.Context, keyID string) (*RSAPublicKey, error) {
+	if !keyIDPattern.MatchString(keyID) {
+		return nil, fmt.Errorf("%w: invalid RSA key ID", ErrInvalidInput)
+	}
+	method := http.MethodGet
+	var input any
+	if s.client.native {
+		method, input = http.MethodPost, struct{}{}
+	}
+	var result RSAPublicKey
+	if err := s.client.request(ctx, method, "/rsa/keys/"+keyID+"/publickey", nil, input, &result); err != nil {
+		return nil, err
+	}
 	return &result, nil
 }
 
+// RSAEncryptOAEP encrypts plaintext locally using a trusted SPKI DER RSA public key,
+// SHA-256 for OAEP and MGF1, and the optional label used by the decryptor.
+func RSAEncryptOAEP(publicKeyDER, plaintext, label []byte) ([]byte, error) {
+	publicKey, err := parseRSAPublicKeyDER(publicKeyDER)
+	if err != nil {
+		return nil, err
+	}
+	return rsa.EncryptOAEP(sha256.New(), rand.Reader, publicKey, plaintext, label)
+}
+
 func (s *rsaService) Sign(ctx context.Context, keyID string, digest []byte) ([]byte, error) {
+	if !s.client.native {
+		return nil, fmt.Errorf("%w: RSA partial signing requires mpc-node-api", ErrOperationFailed)
+	}
 	if !keyIDPattern.MatchString(keyID) || len(digest) != sha256.Size {
 		return nil, fmt.Errorf("%w: RSA signing requires a valid key ID and SHA-256 digest", ErrInvalidInput)
 	}
@@ -147,9 +211,8 @@ func (key *RSAPublicKey) validate() (*rsa.PublicKey, error) {
 }
 
 func parseRSAPublicKey(der []byte) (*rsa.PublicKey, error) {
-	parsed, err := x509.ParsePKIXPublicKey(der)
-	key, ok := parsed.(*rsa.PublicKey)
-	if err != nil || !ok || key.E != 65537 || key.N.Bit(0) == 0 {
+	key, err := parseRSAPublicKeyDER(der)
+	if err != nil || key.E != 65537 || key.N.Bit(0) == 0 {
 		return nil, fmt.Errorf("%w: invalid RSA public key", ErrInvalidInput)
 	}
 	switch key.N.BitLen() {
@@ -158,6 +221,15 @@ func parseRSAPublicKey(der []byte) (*rsa.PublicKey, error) {
 	default:
 		return nil, fmt.Errorf("%w: unsupported RSA public key size", ErrInvalidInput)
 	}
+}
+
+func parseRSAPublicKeyDER(der []byte) (*rsa.PublicKey, error) {
+	parsed, err := x509.ParsePKIXPublicKey(der)
+	key, ok := parsed.(*rsa.PublicKey)
+	if err != nil || !ok {
+		return nil, fmt.Errorf("%w: invalid RSA public key", ErrInvalidInput)
+	}
+	return key, nil
 }
 
 func decodeRSASignShare(data []byte, maxSize int) (thresholdrsa.SignShare, bool) {

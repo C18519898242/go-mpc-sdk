@@ -14,7 +14,7 @@ import (
 	"reflect"
 	"testing"
 
-	thresholdrsa "github.com/cloudflare/circl/tss/rsa"
+	thresholdrsa "github.com/C18519898242/circl/tss/rsa"
 )
 
 func TestRSAGenerateKeyWireContract(t *testing.T) {
@@ -117,7 +117,7 @@ func TestRSASignAndFinalize(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		key, err = client.RSA().PublicKey(t.Context(), "test-rsa")
+		key, err = client.RSA().PublicKeyInfo(t.Context(), "test-rsa")
 		if err != nil || !bytes.Equal(key.PublicKey, publicKey) || key.Players != 3 || key.RequiredSigners != 2 {
 			t.Fatalf("PublicKey returned (%v, %v)", key, err)
 		}
@@ -172,5 +172,67 @@ func TestRSAIncompatibleProtocolDoesNotEnableRSA(t *testing.T) {
 	}
 	if client.rsa != nil || client.native || client.ecdsa == nil {
 		t.Fatal("incompatible RSA advertisement changed the supported protocols")
+	}
+}
+
+func TestRSAEncryptOAEPWithPublicKeyFromEitherBackend(t *testing.T) {
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&private.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, backend := range []struct {
+		name, method, protocols string
+	}{
+		{"mpc-node-api", http.MethodPost, `{"rsa":{"name":"circl-tss-rsa","version":1}}`},
+		{"Builder Vault", http.MethodGet, `{"rsa":1}`},
+	} {
+		t.Run(backend.name, func(t *testing.T) {
+			node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/version":
+					_, _ = w.Write([]byte(`{"version":"1"}`))
+				case "/info/protocols":
+					_, _ = w.Write([]byte(backend.protocols))
+				case "/rsa/keys/test-rsa/publickey":
+					if r.Method != backend.method || r.Header.Get("Authorization") != "APIKEY fixture" {
+						t.Error("unexpected RSA public key request")
+					}
+					response := map[string]any{"publicKey": der}
+					if backend.method == http.MethodPost {
+						response["players"], response["requiredSigners"] = 3, 2
+					}
+					_ = json.NewEncoder(w).Encode(response)
+				default:
+					t.Errorf("unexpected HTTP request %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(node.Close)
+			client, err := NewClient(Configuration{URL: node.URL}.WithAPIKeyAuthentication("fixture"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			publicKey, err := client.RSA().PublicKey(t.Context(), "test-rsa")
+			if err != nil || !bytes.Equal(publicKey, der) {
+				t.Fatalf("unexpected RSA public key: %v", err)
+			}
+			message := bytes.Repeat([]byte{0x5a}, private.Size()-2*sha256.Size-2)
+			label := []byte("sdk-test")
+			ciphertext, err := RSAEncryptOAEP(publicKey, message, label)
+			if err != nil || len(ciphertext) != private.Size() {
+				t.Fatalf("unexpected RSA ciphertext: %v", err)
+			}
+			plaintext, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, private, ciphertext, label)
+			if err != nil || !bytes.Equal(plaintext, message) {
+				t.Fatalf("Go RSA-OAEP could not recover the original message: %v", err)
+			}
+			if _, err := RSAEncryptOAEP(publicKey, append(message, 0), label); !errors.Is(err, rsa.ErrMessageTooLong) {
+				t.Fatalf("oversized message returned %v", err)
+			}
+		})
 	}
 }

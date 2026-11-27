@@ -23,13 +23,23 @@ type Configuration struct {
 	URL string
 
 	apiKey            string
+	rsaDecryptionAuth bool
 	rootCAFile        string
 	disableKeepAlives bool
 }
 
 // WithAPIKeyAuthentication returns a copy using API Key authentication.
+// Use WithRSADecryptionAuthentication for credentials with RSA decryption permission.
 func (c Configuration) WithAPIKeyAuthentication(apiKey string) *Configuration {
 	c.apiKey = apiKey
+	return &c
+}
+
+// WithRSADecryptionAuthentication configures an API key for RSA-OAEP
+// decryption and connects directly over HTTPS, including during discovery.
+func (c Configuration) WithRSADecryptionAuthentication(apiKey string) *Configuration {
+	c.apiKey = apiKey
+	c.rsaDecryptionAuth = true
 	return &c
 }
 
@@ -47,13 +57,14 @@ func (c Configuration) WithKeepAlives(enabled bool) *Configuration {
 
 // Client represents one node. It can be used concurrently.
 type Client struct {
-	base    *url.URL
-	apiKey  string
-	http    *http.Client
-	native  bool
-	ecdsa   ECDSAAPI
-	schnorr SchnorrAPI
-	rsa     RSAAPI
+	base              *url.URL
+	apiKey            string
+	rsaDecryptionAuth bool
+	http              *http.Client
+	native            bool
+	ecdsa             ECDSAAPI
+	schnorr           SchnorrAPI
+	rsa               RSAAPI
 }
 
 // NewClient authenticates to a node and discovers its key generation services.
@@ -66,9 +77,15 @@ func NewClient(cfg *Configuration) (*Client, error) {
 		base.User != nil || base.RawQuery != "" || base.ForceQuery || base.Fragment != "" {
 		return nil, fmt.Errorf("%w: expected an HTTP(S) node URL with no credentials, query or fragment", ErrInvalidInput)
 	}
+	if cfg.rsaDecryptionAuth && base.Scheme != "https" {
+		return nil, fmt.Errorf("%w: RSA decryption credentials require HTTPS", ErrInvalidInput)
+	}
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true}
 	if standard, ok := http.DefaultTransport.(*http.Transport); ok && standard != nil {
 		transport = standard.Clone()
+	}
+	if cfg.rsaDecryptionAuth {
+		transport.Proxy = nil
 	}
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	transport.DisableKeepAlives = cfg.disableKeepAlives
@@ -84,7 +101,7 @@ func NewClient(cfg *Configuration) (*Client, error) {
 		transport.TLSClientConfig.RootCAs = pool
 	}
 	c := &Client{
-		base: base, apiKey: cfg.apiKey,
+		base: base, apiKey: cfg.apiKey, rsaDecryptionAuth: cfg.rsaDecryptionAuth,
 		http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}},
@@ -131,7 +148,7 @@ func (c *Client) discover() error {
 	if err != nil {
 		return err
 	}
-	_, nativeRSA, err := decodeProtocol(protocols["rsa"])
+	rsaEnabled, nativeRSA, err := decodeProtocol(protocols["rsa"])
 	if err != nil {
 		return err
 	}
@@ -145,7 +162,7 @@ func (c *Client) discover() error {
 	} else if !c.native && schnorr {
 		c.schnorr = &schnorrService{client: c, path: "/schnorr/keys"}
 	}
-	if rsaSupported {
+	if rsaSupported || (rsaEnabled && nativeRSA == nil && !c.native) {
 		c.rsa = &rsaService{client: c}
 	}
 	return nil
