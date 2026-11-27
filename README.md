@@ -133,8 +133,8 @@ SDK 沿用 Builder Vault 的方法签名。两个后端返回各自的恢复数�
 `bits` 支持 2048、3072、4096。`desiredKeyID` 留空时，节点根据会话生成同一个 `keyID`。收齐所有节点的成功响应，并检查 `keyID` 一致。RSA 服务由节点的 `/info/protocols` 公告，节点需要配置 MPC mTLS 和主密码。生成安全素数可能需要几分钟，请为 `ctx` 留足时间。若全组未完成，用新的会话 ID 和 `keyID` 重试。
 
 1. `client.RSA().PublicKeyInfo(ctx, keyID)` 查询 `*tsm.RSAPublicKey`，其中 `PublicKey` 为 SPKI DER，`RequiredSigners` 为最少签名节点数。
-2. 用 `sha256.Sum256(message)` 算出摘要，再对至少 `RequiredSigners` 个不同节点调用 `client.RSA().Sign(ctx, keyID, digest[:])`。每个节点返回一个部分签名，可以独立调用。
-3. `tsm.RSAFinalizeSignature(key, digest[:], partials)` 用可信公钥信息合并并验证，返回标准的 PKCS#1 v1.5 签名。也可以用 `tsm.RSAVerifySignature(key.PublicKey, digest[:], signature)` 单独验签。
+2. **PKCS#1 v1.5**：用 `sha256.Sum256(message)` 算出摘要，再对至少 `RequiredSigners` 个不同节点调用 `client.RSA().Sign(ctx, keyID, digest[:])`。每个节点返回一个部分签名，可以独立调用；最后调用 `tsm.RSAFinalizeSignature(key, digest[:], partials)` 合并并验证，也可以用 `tsm.RSAVerifySignature(key.PublicKey, digest[:], signature)` 单独验签。
+3. **RSA-PSS（SHA-256，32 字节盐）**：仅对齐 Builder Vault Go 方法签名（REST 层使用 `mpc-node-api` 的 HTTPS、API Key、`MPC-Players` 会话头、字符串 `"SHA256"` 与 CIRCL JSON 分片封装格式）。每次签名创建新会话（例如 2-of-3 密钥选择节点 1 和 3 时使用 `tsm.NewSessionConfig(tsm.GenerateSessionID(), []int{0, 2}, nil, nil)`），对选定节点通过 HTTPS 并发调用 `client.RSA().SignPSS(ctx, session, keyID, tsm.HashFunctionSHA256, digest[:])`。收齐各节点返回的 `partialSignature` 后，调用 `tsm.RSAFinalizeSignaturePSS(tsm.HashFunctionSHA256, digest[:], partials)` 重建 PSS 编码、合并分片并用 `rsa.VerifyPSS`（`PSSSaltLengthEqualsHash`）验证；也可使用 `tsm.RSAVerifySignaturePSS(publicKeyDER, tsm.HashFunctionSHA256, digest[:], signature)` 单独验签。若通过消息队列或中继收集分片，合并方须核对预期会话并使用事先可信获取的公钥再次调用 `RSAVerifySignaturePSS` 校验最终签名。
 
 SDK 使用 CIRCL fork 的 RSA 子模块 v0.1.0 合并 RSA 签名和解密分片，构建 SDK 需要 Go 1.25 或更新版本。
 

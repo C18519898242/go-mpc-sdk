@@ -30,6 +30,8 @@ type RSAAPI interface {
 	PublicKeyInfo(ctx context.Context, keyID string) (*RSAPublicKey, error)
 	// Sign returns this node's partial signature for a 32-byte SHA-256 digest.
 	Sign(ctx context.Context, keyID string, digest []byte) ([]byte, error)
+	// SignPSS returns this node's partial RSA-PSS signature for a SHA-256 digest.
+	SignPSS(ctx context.Context, session *SessionConfig, keyID, hashFunction string, digest []byte) ([]byte, error)
 	// Decrypt returns this node's partial RSA-OAEP decryption over HTTPS.
 	Decrypt(ctx context.Context, keyID string, ciphertext []byte) ([]byte, error)
 }
