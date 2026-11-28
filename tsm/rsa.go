@@ -26,6 +26,8 @@ type RSAAPI interface {
 	GenerateDecryptionKey(ctx context.Context, session *SessionConfig, threshold, bits int, desiredKeyID string) (string, error)
 	// ImportKey installs this player's encrypted share of an external signing key.
 	ImportKey(ctx context.Context, session *SessionConfig, wrappedKeyShare []byte, desiredKeyID string) (string, error)
+	// ExportKey exports this player's RSA signing share encrypted to wrappingKey.
+	ExportKey(ctx context.Context, session *SessionConfig, keyID string, wrappingKey []byte) (*RSAWrappedKeyShare, error)
 	// PublicKey returns the RSA public key as SPKI DER, matching Builder Vault.
 	PublicKey(ctx context.Context, keyID string) ([]byte, error)
 	// PublicKeyInfo returns the mpc-node-api public key and its signing parameters.
@@ -43,6 +45,12 @@ type RSAPublicKey struct {
 	PublicKey       []byte `json:"publicKey"`
 	Players         uint   `json:"players"`
 	RequiredSigners uint   `json:"requiredSigners"`
+}
+
+// RSAWrappedKeyShare contains one player's encrypted RSA share export and its SPKI DER public key.
+type RSAWrappedKeyShare struct {
+	WrappedKeyShare []byte
+	PKIXPublicKey   []byte
 }
 
 // RSA returns the node's RSA service. It panics if the node disables it.

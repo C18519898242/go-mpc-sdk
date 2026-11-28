@@ -150,6 +150,41 @@ SDK 使用 CIRCL fork 的 RSA 子模块 v0.1.0 合并 RSA 签名和解密分片�
 
 为导入和 PSS 签名创建客户端时，建议使用 `tsm.Configuration{URL: "https://node.example.com"}.WithHTTPSAuthentication(apiKey)`。它在探测服务前校验使用的是 HTTPS，并直连节点。节点使用内部 CA 时，可再调用 `WithRootCAFile(caPath)`。通用的 `WithAPIKeyAuthentication` 支持 HTTP，使用 HTTP 地址时会在 SDK 探测阶段发送凭据。
 
+### 导出和迁移 RSA 签名密钥
+
+`client.RSA().ExportKey(ctx, session, keyID, wrappingKey)` 支持从源 `mpc-node-api` 集群导出各节点的加密 RSA 签名分片（返回 `*tsm.RSAWrappedKeyShare`，含 `WrappedKeyShare` 和 `PKIXPublicKey`），随后交给目标 `mpc-node-api` 集群的 `ImportKey` 完成同公钥、同门限的加密迁移。第一版仅支持两套 `mpc-node-api` 集群之间的原分片迁移，各源节点须开启 `keyTransfer.exportEnabled` 并在 `keyTransfer.exportWrappingKeys` 中允许对应目标节点的包装公钥。
+
+```go
+exportSession := tsm.NewStaticSessionConfig(tsm.GenerateSessionID(), 3)
+exported := make([]*tsm.RSAWrappedKeyShare, 3)
+var wg sync.WaitGroup
+var exportErrs [3]error
+for i := range 3 {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// dstWrappingKeys[i] 为对应目标节点包装公钥的 SPKI DER 字节
+		exported[i], exportErrs[i] = srcClients[i].RSA().ExportKey(ctx, exportSession, srcKeyID, dstWrappingKeys[i])
+	}()
+}
+wg.Wait()
+// 确认 exportErrs 均为空，且各节点返回的 exported[i].PKIXPublicKey 一致
+
+importSession := tsm.NewStaticSessionConfig(tsm.GenerateSessionID(), 3)
+importedIDs := make([]string, 3)
+var importErrs [3]error
+for i := range 3 {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		importedIDs[i], importErrs[i] = dstClients[i].RSA().ImportKey(ctx, importSession, exported[i].WrappedKeyShare, dstKeyID)
+	}()
+}
+wg.Wait()
+// 确认 importErrs 均为空且 importedIDs 一致；目标节点 PublicKey 应与 exported[0].PKIXPublicKey 字节一致，
+// 随后即可对目标节点 1 和 3 发起 SignPSS 并使用源公钥 RSAVerifySignaturePSS 验签。
+```
+
 ### RSA 公钥加密
 
 `client.RSA().PublicKey(ctx, keyID)` 对两个后端均使用 `GET /rsa/keys/{keyID}/publickey`，返回 SPKI DER 字节。需要建钥节点数和签名门限时，对 `mpc-node-api` 使用 `PublicKeyInfo(ctx, keyID)`。

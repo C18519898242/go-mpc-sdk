@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -158,4 +159,38 @@ func (s *rsaService) ImportKey(ctx context.Context, session *SessionConfig, wrap
 		WrappedKeyShare []byte `json:"wrappedKeyShare"`
 	}{desiredKeyID, wrappedKeyShare}
 	return s.client.requestKeyID(ctx, "/rsa/keys/importkey", session, desiredKeyID, request)
+}
+
+func (s *rsaService) ExportKey(ctx context.Context, session *SessionConfig, keyID string, wrappingKey []byte) (*RSAWrappedKeyShare, error) {
+	if !s.client.native {
+		return nil, fmt.Errorf("%w: RSA export requires mpc-node-api", ErrOperationFailed)
+	}
+	if s.client.base.Scheme != "https" || session == nil || len(session.players) < 2 ||
+		!keyIDPattern.MatchString(keyID) {
+		return nil, fmt.Errorf("%w: RSA export requires HTTPS, a valid key ID and at least two players", ErrInvalidInput)
+	}
+	wrappingPublic, err := parseRSAPublicKeyDER(wrappingKey)
+	if err != nil || wrappingPublic.N.BitLen() < 2048 || wrappingPublic.N.BitLen() > 8192 || wrappingPublic.E < 65537 {
+		return nil, fmt.Errorf("%w: invalid RSA wrapping public key", ErrInvalidInput)
+	}
+	request := struct {
+		WrappingKey []byte `json:"wrappingKey"`
+	}{wrappingKey}
+	var response struct {
+		WrappedKeyShare []byte `json:"wrappedKeyShare"`
+		PublicKey       []byte `json:"publicKey"`
+	}
+	if err := s.client.requestWithLimit(ctx, http.MethodPost, "/rsa/keys/"+keyID+"/exportkey", session, request, &response, rsaImportMaxBody); err != nil {
+		return nil, err
+	}
+	if _, ok := parseNativeWrappedKeyShare(response.WrappedKeyShare); !ok || len(response.WrappedKeyShare) > rsaImportMaxBody*3/4-128 {
+		return nil, fmt.Errorf("%w: invalid exported RSA key envelope", ErrOperationFailed)
+	}
+	if _, err := parseRSAPublicKey(response.PublicKey); err != nil {
+		return nil, signatureError("invalid exported RSA public key")
+	}
+	return &RSAWrappedKeyShare{
+		WrappedKeyShare: response.WrappedKeyShare,
+		PKIXPublicKey:   response.PublicKey,
+	}, nil
 }
