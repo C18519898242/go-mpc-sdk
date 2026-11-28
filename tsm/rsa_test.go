@@ -185,10 +185,10 @@ func TestRSAEncryptOAEPWithPublicKeyFromEitherBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, backend := range []struct {
-		name, method, protocols string
+		name, protocols string
 	}{
-		{"mpc-node-api", http.MethodPost, `{"rsa":{"name":"circl-tss-rsa","version":1}}`},
-		{"Builder Vault", http.MethodGet, `{"rsa":1}`},
+		{"mpc-node-api", `{"rsa":{"name":"circl-tss-rsa","version":1}}`},
+		{"Builder Vault", `{"rsa":1}`},
 	} {
 		t.Run(backend.name, func(t *testing.T) {
 			node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -198,14 +198,10 @@ func TestRSAEncryptOAEPWithPublicKeyFromEitherBackend(t *testing.T) {
 				case "/info/protocols":
 					_, _ = w.Write([]byte(backend.protocols))
 				case "/rsa/keys/test-rsa/publickey":
-					if r.Method != backend.method || r.Header.Get("Authorization") != "APIKEY fixture" {
+					if r.Method != http.MethodGet || r.Header.Get("Authorization") != "APIKEY fixture" {
 						t.Error("unexpected RSA public key request")
 					}
-					response := map[string]any{"publicKey": der}
-					if backend.method == http.MethodPost {
-						response["players"], response["requiredSigners"] = 3, 2
-					}
-					_ = json.NewEncoder(w).Encode(response)
+					_ = json.NewEncoder(w).Encode(map[string][]byte{"publicKey": der})
 				default:
 					t.Errorf("unexpected HTTP request %s %s", r.Method, r.URL.Path)
 					http.NotFound(w, r)

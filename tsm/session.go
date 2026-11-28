@@ -67,7 +67,7 @@ func GenerateSessionID() string {
 	return base64.RawURLEncoding.EncodeToString(random[:])
 }
 
-func (s *SessionConfig) apply(req *http.Request, native bool) error {
+func (s *SessionConfig) apply(req *http.Request, native, oneBasedPlayers bool) error {
 	if !sessionIDPattern.MatchString(s.id) {
 		return fmt.Errorf("%w: malformed MPC session ID", ErrInvalidInput)
 	}
@@ -89,7 +89,9 @@ func (s *SessionConfig) apply(req *http.Request, native bool) error {
 			if len(key) != 0 || s.addresses[player] != "" {
 				return fmt.Errorf("%w: dynamic players are unsupported by this node", ErrInvalidInput)
 			}
-			value = strconv.FormatUint(uint64(player)+1, 10)
+			if oneBasedPlayers {
+				value = strconv.FormatUint(uint64(player)+1, 10)
+			}
 		} else if len(key) > 0 {
 			value += " " + base64.RawURLEncoding.EncodeToString(key)
 			if address := s.addresses[player]; address != "" {

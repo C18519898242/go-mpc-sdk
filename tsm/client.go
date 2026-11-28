@@ -206,6 +206,10 @@ func (c *Client) request(ctx context.Context, method, path string, session *Sess
 }
 
 func (c *Client) requestWithLimit(ctx context.Context, method, path string, session *SessionConfig, input, output any, maxResponse int64) error {
+	return c.requestWithPlayerIDs(ctx, method, path, session, input, output, maxResponse, c.native)
+}
+
+func (c *Client) requestWithPlayerIDs(ctx context.Context, method, path string, session *SessionConfig, input, output any, maxResponse int64, oneBasedPlayers bool) error {
 	var body io.Reader
 	if input != nil {
 		data, err := json.Marshal(input)
@@ -228,7 +232,7 @@ func (c *Client) requestWithLimit(ctx context.Context, method, path string, sess
 		req.Header.Set("Content-Type", contentType)
 	}
 	if session != nil {
-		if err := session.apply(req, c.native); err != nil {
+		if err := session.apply(req, c.native, oneBasedPlayers); err != nil {
 			return err
 		}
 	}

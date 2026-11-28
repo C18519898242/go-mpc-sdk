@@ -7,8 +7,10 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/gob"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -17,6 +19,110 @@ import (
 
 	thresholdrsa "github.com/C18519898242/circl/tss/rsa"
 )
+
+func TestRSAPSSBuilderVault(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte("Builder Vault PSS compatibility"))
+	want, err := rsa.SignPSS(rand.Reader, key, crypto.SHA256, digest[:], &rsa.PSSOptions{SaltLength: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Split a known signature into two multiplicative contributions for the wire fixture.
+	input := new(big.Int).Exp(new(big.Int).SetBytes(want), big.NewInt(int64(key.E)), key.N)
+	inputHash := sha256.Sum256(input.Bytes())
+	factor := big.NewInt(2)
+	other := new(big.Int).ModInverse(factor, key.N)
+	other.Mul(other, new(big.Int).SetBytes(want)).Mod(other, key.N)
+	type contribution struct {
+		Players []int
+		MExpDi  *big.Int
+	}
+	makePartial := func(index int, contributions ...contribution) []byte {
+		t.Helper()
+		result := struct {
+			Version, Sharing, PlayerIndex, Threshold int
+			ProtocolID                               string
+			E, N                                     *big.Int
+			Shares                                   []contribution
+			HashedInput                              []byte
+		}{1, 5, index, 1, "RSA", big.NewInt(int64(key.E)), key.N, contributions, inputHash[:]}
+		var encoded bytes.Buffer
+		if err := gob.NewEncoder(&encoded).Encode(result); err != nil {
+			t.Fatal(err)
+		}
+		return encoded.Bytes()
+	}
+	first := makePartial(0, contribution{[]int{0, 1}, big.NewInt(7)}, contribution{[]int{2, 0}, factor})
+	second := makePartial(2, contribution{[]int{0, 2}, other})
+	third := makePartial(1, contribution{[]int{1, 2}, big.NewInt(3)})
+	malformed := makePartial(0, contribution{[]int{2, 2}, factor})
+	var sendMalformed atomic.Bool
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version":
+			_, _ = w.Write([]byte(`{"version":"73.5.2"}`))
+		case "/info/protocols":
+			_, _ = w.Write([]byte(`{"rsa":12}`))
+		case "/rsa/keys/builder-key/signpss":
+			var request struct {
+				Hash        int
+				MessageHash []byte
+				Players     json.RawMessage
+			}
+			if r.Method != http.MethodPost || !reflect.DeepEqual(r.Header.Values("MPC-Players"), []string{"0", "2"}) ||
+				json.NewDecoder(r.Body).Decode(&request) != nil || request.Hash != 5 ||
+				string(request.Players) != "null" || !bytes.Equal(request.MessageHash, digest[:]) {
+				t.Error("unexpected Builder Vault RSA-PSS request")
+			}
+			partial := first
+			if sendMalformed.Load() {
+				partial = malformed
+			}
+			_ = json.NewEncoder(w).Encode(map[string][]byte{"partialSignature": partial})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(node.Close)
+	client, err := NewClient(Configuration{URL: node.URL}.WithAPIKeyAuthentication("fixture"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := NewSessionConfig("builder-pss", []int{0, 2}, nil, nil)
+	part, err := client.RSA().SignPSS(t.Context(), session, "builder-key", HashFunctionSHA256, digest[:])
+	if err != nil || !bytes.Equal(part, first) {
+		t.Fatalf("SignPSS did not return the Builder Vault partial signature: %v", err)
+	}
+	sendMalformed.Store(true)
+	if _, err := client.RSA().SignPSS(t.Context(), session, "builder-key", HashFunctionSHA256, digest[:]); !errors.Is(err, ErrOperationFailed) {
+		t.Fatalf("SignPSS accepted an invalid Builder Vault signing subset: %v", err)
+	}
+	got, err := RSAFinalizeSignaturePSS(HashFunctionSHA256, digest[:], [][]byte{second, third, part})
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("did not combine the Builder Vault partial signatures: %v", err)
+	}
+	publicKeyDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RSAVerifySignaturePSS(publicKeyDER, HashFunctionSHA256, digest[:], got); err != nil {
+		t.Fatalf("did not verify the Builder Vault signature with a 20-byte salt: %v", err)
+	}
+	got, err = RSAFinalizeSignaturePSS(HashFunctionSHA256, nil, [][]byte{second, part})
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("did not combine the Builder Vault partial signatures without a digest: %v", err)
+	}
+	wrongDigest := sha256.Sum256([]byte("other message"))
+	if _, err := RSAFinalizeSignaturePSS(HashFunctionSHA256, wrongDigest[:], [][]byte{second, part}); err == nil {
+		t.Fatal("accepted Builder Vault partial signatures for the wrong digest")
+	}
+	if _, err := RSAFinalizeSignaturePSS(HashFunctionSHA256, digest[:], [][]byte{part, part}); err == nil {
+		t.Fatal("accepted duplicate Builder Vault partial signatures")
+	}
+}
 
 func TestRSAPSSSignAndFinalize(t *testing.T) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -85,12 +191,12 @@ func TestRSAPSSSignAndFinalize(t *testing.T) {
 					_, _ = w.Write([]byte(`{"rsa":{"name":"circl-tss-rsa","version":1}}`))
 				case "/rsa/keys/pss-key/signpss":
 					var input struct {
-						Hash        string `json:"hash"`
+						Hash        int    `json:"hash"`
 						MessageHash []byte `json:"messageHash"`
 					}
 					if r.Method != http.MethodPost || r.Header.Get("Authorization") != "APIKEY fixture" ||
-						r.Header.Get("MPC-SessionID") != sessionID || !reflect.DeepEqual(r.Header.Values("MPC-Players"), []string{"1", "3"}) ||
-						json.NewDecoder(r.Body).Decode(&input) != nil || input.Hash != "SHA256" || !bytes.Equal(input.MessageHash, digest[:]) {
+						r.Header.Get("MPC-SessionID") != sessionID || !reflect.DeepEqual(r.Header.Values("MPC-Players"), []string{"0", "2"}) ||
+						json.NewDecoder(r.Body).Decode(&input) != nil || input.Hash != 5 || !bytes.Equal(input.MessageHash, digest[:]) {
 						t.Error("unexpected RSA-PSS sign request")
 					}
 					payload := envelope
@@ -347,8 +453,8 @@ func TestRSAPSSMultiBitAndDoubleDigitPlayers(t *testing.T) {
 			case "/info/protocols":
 				_, _ = w.Write([]byte(`{"rsa":{"name":"circl-tss-rsa","version":1}}`))
 			case "/rsa/keys/ten-player-key/signpss":
-				if !reflect.DeepEqual(r.Header.Values("MPC-Players"), []string{"2", "10"}) {
-					t.Errorf("MPC-Players = %v, want [2 10]", r.Header.Values("MPC-Players"))
+				if !reflect.DeepEqual(r.Header.Values("MPC-Players"), []string{"1", "9"}) {
+					t.Errorf("MPC-Players = %v, want [1 9]", r.Header.Values("MPC-Players"))
 				}
 				_ = json.NewEncoder(w).Encode(map[string][]byte{"partialSignature": envelope})
 			default:

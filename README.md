@@ -134,7 +134,9 @@ SDK 沿用 Builder Vault 的方法签名。两个后端返回各自的恢复数�
 
 1. `client.RSA().PublicKeyInfo(ctx, keyID)` 查询 `*tsm.RSAPublicKey`，其中 `PublicKey` 为 SPKI DER，`RequiredSigners` 为最少签名节点数。
 2. **PKCS#1 v1.5**：用 `sha256.Sum256(message)` 算出摘要，再对至少 `RequiredSigners` 个不同节点调用 `client.RSA().Sign(ctx, keyID, digest[:])`。每个节点返回一个部分签名，可以独立调用；最后调用 `tsm.RSAFinalizeSignature(key, digest[:], partials)` 合并并验证，也可以用 `tsm.RSAVerifySignature(key.PublicKey, digest[:], signature)` 单独验签。
-3. **RSA-PSS（SHA-256，32 字节盐）**：仅对齐 Builder Vault Go 方法签名（REST 层使用 `mpc-node-api` 的 HTTPS、API Key、`MPC-Players` 会话头、字符串 `"SHA256"` 与 CIRCL JSON 分片封装格式）。每次签名创建新会话（例如 2-of-3 密钥选择节点 1 和 3 时使用 `tsm.NewSessionConfig(tsm.GenerateSessionID(), []int{0, 2}, nil, nil)`），对选定节点通过 HTTPS 并发调用 `client.RSA().SignPSS(ctx, session, keyID, tsm.HashFunctionSHA256, digest[:])`。收齐各节点返回的 `partialSignature` 后，调用 `tsm.RSAFinalizeSignaturePSS(tsm.HashFunctionSHA256, digest[:], partials)` 重建 PSS 编码、合并分片并用 `rsa.VerifyPSS`（`PSSSaltLengthEqualsHash`）验证；也可使用 `tsm.RSAVerifySignaturePSS(publicKeyDER, tsm.HashFunctionSHA256, digest[:], signature)` 单独验签。若通过消息队列或中继收集分片，合并方须核对预期会话并使用事先可信获取的公钥再次调用 `RSAVerifySignaturePSS` 校验最终签名。
+3. **RSA-PSS（SHA-256）**。每次签名创建新会话，例如使用 `tsm.NewSessionConfig(tsm.GenerateSessionID(), []int{0, 2}, nil, nil)` 选择 2-of-3 密钥的节点 1 和 3。对选定节点通过 HTTPS 并发调用 `client.RSA().SignPSS(ctx, session, keyID, tsm.HashFunctionSHA256, digest[:])`。SDK 对两个后端均发送数值 `hash: 5`、`players: null` 和从 0 开始的 `MPC-Players`。收齐同一个后端在同一会话返回的分片后，调用 `tsm.RSAFinalizeSignaturePSS(tsm.HashFunctionSHA256, digest[:], partials)`。SDK 支持本项目的 CIRCL 分片与 Builder Vault 的 ADN06 分片。收到最终签名后，可使用可信公钥调用 `tsm.RSAVerifySignaturePSS(publicKeyDER, tsm.HashFunctionSHA256, digest[:], signature)` 验签。
+
+合并 Builder Vault 分片时若传入空摘要，SDK 只检查合并结果与分片携带的 RSA 输入哈希是否一致。使用签名前取得的可信公钥和预期摘要调用 `RSAVerifySignaturePSS`，确认签名对应目标密钥和消息。
 
 SDK 使用 CIRCL fork 的 RSA 子模块 v0.1.0 合并 RSA 签名和解密分片，构建 SDK 需要 Go 1.25 或更新版本。
 
@@ -150,7 +152,7 @@ SDK 使用 CIRCL fork 的 RSA 子模块 v0.1.0 合并 RSA 签名和解密分片�
 
 ### RSA 公钥加密
 
-`client.RSA().PublicKey(ctx, keyID)` 对齐 Builder Vault Go SDK，返回 SPKI DER 字节。该方法适用于 `mpc-node-api` 和 Builder Vault。**升级 SDK 时**，原先从 `PublicKey` 读取 `*tsm.RSAPublicKey` 或将结果传给 `RSAFinalizeSignature` 的代码，需要改用 `PublicKeyInfo(ctx, keyID)`。
+`client.RSA().PublicKey(ctx, keyID)` 对两个后端均使用 `GET /rsa/keys/{keyID}/publickey`，返回 SPKI DER 字节。需要建钥节点数和签名门限时，对 `mpc-node-api` 使用 `PublicKeyInfo(ctx, keyID)`。
 
 取到可信公钥后，调用 `tsm.RSAEncryptOAEP(publicKey, plaintext, label)` 在本地加密。OAEP 和 MGF1 都使用 SHA-256，解密方需要使用相同的 `label`，没有标签时传 `nil`。RSA-2048 的明文上限为 190 字节，RSA-4096 为 446 字节。
 

@@ -19,6 +19,9 @@ import (
 
 const rsaPSSFormat = "circl-rsa-pss-sha256-v1"
 
+// Account for base64 encoding and the JSON response envelope.
+const maxRSAPSSResponseSize = maxBuilderRSAPartSize*4/3 + 1024
+
 type rsaPSSEnvelope struct {
 	Format       string   `json:"format"`
 	SessionID    string   `json:"sessionID"`
@@ -35,31 +38,33 @@ type rsaPSSEnvelope struct {
 }
 
 func (s *rsaService) SignPSS(ctx context.Context, session *SessionConfig, keyID, hashFunction string, digest []byte) ([]byte, error) {
-	if !s.client.native {
-		return nil, fmt.Errorf("%w: RSA-PSS partial signing requires mpc-node-api", ErrOperationFailed)
-	}
 	if session == nil || len(session.players) < 2 || !keyIDPattern.MatchString(keyID) ||
 		hashFunction != HashFunctionSHA256 || len(digest) != sha256.Size {
 		return nil, fmt.Errorf("%w: RSA-PSS signing requires a session, valid key ID, SHA256 and a 32-byte digest", ErrInvalidInput)
 	}
-	expectedSigners := make([]string, len(session.players))
-	for i, player := range session.players {
-		if player < 0 {
-			return nil, fmt.Errorf("%w: negative player index", ErrInvalidInput)
-		}
-		expectedSigners[i] = strconv.FormatUint(uint64(player)+1, 10)
-	}
-	slices.Sort(expectedSigners)
 	request := struct {
-		Hash        string `json:"hash"`
-		MessageHash []byte `json:"messageHash"`
-	}{hashFunction, digest}
+		Hash        crypto.Hash `json:"hash"`
+		MessageHash []byte      `json:"messageHash"`
+		Players     []int       `json:"players"`
+	}{Hash: crypto.SHA256, MessageHash: digest}
 	var response struct {
 		PartialSignature []byte `json:"partialSignature"`
 	}
-	if err := s.client.request(ctx, http.MethodPost, "/rsa/keys/"+keyID+"/signpss", session, request, &response); err != nil {
+	if err := s.client.requestWithPlayerIDs(ctx, http.MethodPost, "/rsa/keys/"+keyID+"/signpss", session, request, &response, maxRSAPSSResponseSize, false); err != nil {
 		return nil, err
 	}
+	if !s.client.native {
+		part, err := decodeBuilderRSAPart(response.PartialSignature)
+		if err != nil || part.Threshold >= len(session.players) || !slices.Contains(session.players, part.PlayerIndex) {
+			return nil, signatureError("invalid Builder Vault RSA-PSS partial signature response")
+		}
+		return response.PartialSignature, nil
+	}
+	expectedSigners := make([]string, len(session.players))
+	for i, player := range session.players {
+		expectedSigners[i] = strconv.FormatUint(uint64(player)+1, 10)
+	}
+	slices.Sort(expectedSigners)
 	part, _, _, err := decodeRSAPSSEnvelope(response.PartialSignature)
 	if err != nil || part.SessionID != session.SessionID() || part.KeyID != keyID ||
 		part.HashFunction != hashFunction || !bytes.Equal(part.Digest, digest) ||
@@ -69,20 +74,28 @@ func (s *rsaService) SignPSS(ctx context.Context, session *SessionConfig, keyID,
 	return response.PartialSignature, nil
 }
 
-// RSAFinalizeSignaturePSS combines distinct RSA-PSS shares from the same signing
-// session and verifies the resulting signature against the expected SHA-256 digest.
+// RSAFinalizeSignaturePSS combines RSA-PSS shares from one session on either
+// backend. Supply the expected digest to verify it during combination. When
+// combining Builder Vault shares with no digest, verify the result separately
+// against the expected digest and a trusted public key.
 func RSAFinalizeSignaturePSS(hashFunction string, digest []byte, partialSignatures [][]byte) ([]byte, error) {
-	if hashFunction != HashFunctionSHA256 || len(digest) != sha256.Size {
-		return nil, fmt.Errorf("%w: RSA-PSS requires SHA256 and a 32-byte digest", ErrInvalidInput)
+	if hashFunction != HashFunctionSHA256 || (len(digest) != 0 && len(digest) != sha256.Size) {
+		return nil, fmt.Errorf("%w: RSA-PSS requires SHA256 and, if supplied, a 32-byte digest", ErrInvalidInput)
 	}
 	if len(partialSignatures) < 2 {
 		return nil, signatureError("insufficient RSA-PSS signing shares")
 	}
-	first, publicKey, firstShare, err := decodeRSAPSSEnvelope(partialSignatures[0])
+	firstEncoded := partialSignatures[0]
+	if len(firstEncoded) > 16<<10 || !json.Valid(firstEncoded) {
+		return finalizeBuilderRSAPSS(digest, partialSignatures)
+	}
+	first, publicKey, firstShare, err := decodeRSAPSSEnvelope(firstEncoded)
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(first.Digest, digest) {
+	if len(digest) == 0 {
+		digest = first.Digest
+	} else if !bytes.Equal(first.Digest, digest) {
 		return nil, signatureError("RSA-PSS signing share digest mismatch")
 	}
 	if uint(len(partialSignatures)) < first.Threshold || uint(len(partialSignatures)) > first.Players || len(partialSignatures) > len(first.Signers) {
@@ -123,18 +136,17 @@ func RSAFinalizeSignaturePSS(hashFunction string, digest []byte, partialSignatur
 	return signature, nil
 }
 
-// RSAVerifySignaturePSS verifies a standard RSA-PSS signature over a SHA-256 digest
-// using a salt length equal to the SHA-256 digest size.
+// RSAVerifySignaturePSS verifies a standard RSA-PSS signature over a SHA-256 digest.
+// It determines the salt length from the signature, as Builder Vault does.
 func RSAVerifySignaturePSS(publicKeyDER []byte, hashFunction string, digest, signature []byte) error {
-	publicKey, err := parseRSAPublicKey(publicKeyDER)
+	publicKey, err := parseRSAPublicKeyDER(publicKeyDER)
 	if err != nil {
 		return err
 	}
 	if hashFunction != HashFunctionSHA256 || len(digest) != sha256.Size {
 		return fmt.Errorf("%w: RSA-PSS verification requires SHA256 and a 32-byte digest", ErrInvalidInput)
 	}
-	opts := &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: crypto.SHA256}
-	if rsa.VerifyPSS(publicKey, crypto.SHA256, digest, signature, opts) != nil {
+	if rsa.VerifyPSS(publicKey, crypto.SHA256, digest, signature, nil) != nil {
 		return signatureError("RSA-PSS signature failed verification")
 	}
 	return nil

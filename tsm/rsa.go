@@ -16,7 +16,7 @@ import (
 	thresholdrsa "github.com/C18519898242/circl/tss/rsa"
 )
 
-// RSAAPI provides public key lookup on both backends and threshold operations on mpc-node-api.
+// RSAAPI provides public key lookup and PSS signing on both backends.
 type RSAAPI interface {
 	// GenerateKey participates in a trusted-dealer session requiring threshold+1 signers.
 	// Every selected player must call it with the same session, threshold, size and desired ID.
@@ -83,7 +83,7 @@ func (s *rsaService) generateKey(ctx context.Context, session *SessionConfig, th
 }
 
 func (s *rsaService) PublicKey(ctx context.Context, keyID string) ([]byte, error) {
-	result, err := s.requestPublicKey(ctx, keyID)
+	result, err := s.requestPublicKey(ctx, keyID, http.MethodGet, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +97,7 @@ func (s *rsaService) PublicKeyInfo(ctx context.Context, keyID string) (*RSAPubli
 	if !s.client.native {
 		return nil, fmt.Errorf("%w: RSA signing parameters require mpc-node-api", ErrOperationFailed)
 	}
-	result, err := s.requestPublicKey(ctx, keyID)
+	result, err := s.requestPublicKey(ctx, keyID, http.MethodPost, struct{}{})
 	if err != nil {
 		return nil, err
 	}
@@ -107,14 +107,9 @@ func (s *rsaService) PublicKeyInfo(ctx context.Context, keyID string) (*RSAPubli
 	return result, nil
 }
 
-func (s *rsaService) requestPublicKey(ctx context.Context, keyID string) (*RSAPublicKey, error) {
+func (s *rsaService) requestPublicKey(ctx context.Context, keyID, method string, input any) (*RSAPublicKey, error) {
 	if !keyIDPattern.MatchString(keyID) {
 		return nil, fmt.Errorf("%w: invalid RSA key ID", ErrInvalidInput)
-	}
-	method := http.MethodGet
-	var input any
-	if s.client.native {
-		method, input = http.MethodPost, struct{}{}
 	}
 	var result RSAPublicKey
 	if err := s.client.request(ctx, method, "/rsa/keys/"+keyID+"/publickey", nil, input, &result); err != nil {
